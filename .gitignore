@@ -1,0 +1,68 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code
+.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+**/build/
+.gradle/
+**/.gradle/
+/coverage/
+
+# Android related
+/android/app/debug
+/android/app/profile
+/android/app/release
+android/local.properties
+*.keystore
+*.jks
+
+# iOS related
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/app.framework
+**/ios/Flutter/Flutter.framework
+
+# Binaries & Large Archives (to prevent GitHub 100MB limit)
+*.apk
+*.aab
+*.ipa
+*.zip
+*.rar
+*.7z
+*.tar.gz
+*.xlsx
+*.csv
+*.pdf
+*.log
+*.tmp
+.user_session

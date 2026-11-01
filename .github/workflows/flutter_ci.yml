@@ -1,0 +1,57 @@
+name: Flutter CI & Release Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Verify (Android, Web & iOS Check)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.9'
+          channel: 'stable'
+          cache: true
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Analyze Project
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build Web App
+        run: flutter build web --release
+
+      - name: Build Android Release APK
+        run: flutter build apk --release
+
+      - name: Build iOS Bundle (No Codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SealandX_Export_Android_APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload Web Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SealandX_Export_Web
+          path: build/web
