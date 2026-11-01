@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <base href="$FLUTTER_BASE_HREF">
+  <base href="./">
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
@@ -28,12 +28,19 @@
     }
     
     .loading-screen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      height: 100vh;
       background: linear-gradient(135deg, #004D40 0%, #00796B 50%, #009688 100%);
+      z-index: 999999;
+      pointer-events: all;
+      transition: opacity 0.5s ease-out;
     }
     
     .loading-logo {
@@ -95,6 +102,36 @@
       <div class="loading-bar-fill"></div>
     </div>
   </div>
+
+  <script>
+    function removeLoadingScreen() {
+      var loading = document.getElementById('loading');
+      if (loading) {
+        loading.style.opacity = '0';
+        loading.style.pointerEvents = 'none';
+        setTimeout(function() {
+          if (loading.parentNode) {
+            loading.parentNode.removeChild(loading);
+          }
+        }, 500);
+      }
+    }
+
+    // 1. Flutter first frame event
+    window.addEventListener('flutter-first-frame', removeLoadingScreen);
+
+    // 2. MutationObserver fallback
+    var observer = new MutationObserver(function(mutations, obs) {
+      if (document.querySelector('flutter-view, flt-glass-pane, canvas')) {
+        setTimeout(removeLoadingScreen, 600);
+        obs.disconnect();
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // 3. Failsafe safety timeout (6 seconds)
+    setTimeout(removeLoadingScreen, 6000);
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
