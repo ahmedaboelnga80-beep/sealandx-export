@@ -117,6 +117,46 @@ class SyncManager {
     debugPrint('SyncManager: Queue cleared');
   }
 
+  // Test connection to Google Apps Script Web App
+  static Future<Map<String, dynamic>> testConnection([String? customUrl]) async {
+    try {
+      final settingsBox = Hive.box('settings');
+      String url = (customUrl != null && customUrl.trim().isNotEmpty)
+          ? customUrl.trim()
+          : (settingsBox.get('sync_apps_script_url', defaultValue: '') as String);
+      if (url.trim().isEmpty) {
+        url = _defaultAppsScriptUrl;
+      }
+      final response = await _postWithRedirects(
+        url,
+        {'Content-Type': 'text/plain;charset=utf-8'},
+        jsonEncode({'action': 'test'}),
+      );
+      if (response.statusCode == 200) {
+        try {
+          final resObj = jsonDecode(response.body);
+          if (resObj['status'] == 'success') {
+            if (resObj['driveAuthorized'] == false) {
+              return {
+                'success': false,
+                'message': resObj['message'] ?? 'السكريبت متصل ولكن صلاحيات Google Drive غير مفعلة بعد لرفع الـ PDF.'
+              };
+            }
+            return {'success': true, 'message': resObj['message'] ?? 'الاتصال بالسكريبت يعمل بنجاح! ✓'};
+          } else {
+            return {'success': false, 'message': 'الرد من السيرفر: ${resObj['message'] ?? response.body}'};
+          }
+        } catch (_) {
+          return {'success': false, 'message': 'استجابة غير متوقعة: ${response.body}'};
+        }
+      } else {
+        return {'success': false, 'message': 'خطأ اتصال كود (${response.statusCode})'};
+      }
+    } catch (e) {
+      return {'success': false, 'message': 'تعذر الوصول للرابط: $e'};
+    }
+  }
+
   // Sync a single report
   static Future<bool> _syncReport(String reportPath) async {
     Map<String, dynamic> meta = {};
@@ -213,6 +253,7 @@ class SyncManager {
         'action': 'addReport',
         'spreadsheetUrl': sheetUrl,
         'targetSheetName': sheetName,
+        'sheetName': sheetName,
         'containerNo': containerNo,
         'bookingNo': meta['bookingNo'] ?? '',
         'sealNo': meta['sealNo'] ?? '',
@@ -221,9 +262,12 @@ class SyncManager {
         'type': meta['type'] ?? '',
         'line': meta['line'] ?? '', // Location / Yard
         'shippingLine': meta['shippingLine'] ?? '',
-        'dmg': meta['dmg'] ?? 'NO', // Sealed status
+        'dmg': meta['dmg'] ?? 'YES', // Sealed status (defaults to YES)
         'inspector': meta['inspector'] ?? '',
-        'sealingPerson': meta['sealingPerson'] ?? '',
+        'sealingPerson': (meta['sealingPerson'] != null &&
+                meta['sealingPerson'].toString().trim().isNotEmpty)
+            ? meta['sealingPerson']
+            : (meta['inspector'] ?? ''),
         'createdAt': formattedDate,
         'report': notes,
         'pdfBase64': pdfBase64 ?? '',
@@ -232,7 +276,7 @@ class SyncManager {
       debugPrint('SyncManager: Sending export report to Google Apps Script Web App...');
       final response = await _postWithRedirects(
         appsScriptUrl,
-        {'Content-Type': 'application/json'},
+        {'Content-Type': 'text/plain;charset=utf-8'},
         jsonEncode(payload),
       );
 
@@ -241,8 +285,18 @@ class SyncManager {
         try {
           final resObj = jsonDecode(response.body);
           if (resObj['status'] == 'success') {
-            debugPrint('SyncManager: Google Apps Script accepted the export report ✓');
-            isSuccess = true;
+            final returnedPdfUrl = (resObj['pdfUrl'] ?? '').toString().trim();
+            final returnedPdfErr = (resObj['pdfError'] ?? '').toString().trim();
+            if (pdfBase64 != null && pdfBase64.isNotEmpty && returnedPdfUrl.isEmpty) {
+              lastError = returnedPdfErr.isNotEmpty
+                  ? 'تم إرسال البيانات ولكن فشل رفع الـ PDF على Drive: $returnedPdfErr (تأكد من تشغيل authorizeDriveAndSheets وعمل New Deployment في Apps Script)'
+                  : 'تم إرسال بيانات الحاوية ولكن السكريبت لم يُرجع رابط الـ PDF (يرجى تحديث كود Code.gs وعمل New Deployment مع تفعيل صلاحية Google Drive)';
+              debugPrint('SyncManager Warning: $lastError');
+              isSuccess = false;
+            } else {
+              debugPrint('SyncManager: Google Apps Script accepted the export report ✓ PDF: $returnedPdfUrl');
+              isSuccess = true;
+            }
           } else {
             lastError = 'خطأ من Apps Script: ${resObj['message'] ?? response.body}';
             debugPrint('SyncManager: $lastError');
@@ -289,8 +343,15 @@ class SyncManager {
       pw.MemoryImage? logoImage;
       try {
         final logoData = await rootBundle.load('assets/sealand_logo.png');
-        logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
-      } catch (_) {}
+        logoImage = pw.MemoryImage(
+          logoData.buffer.asUint8List(
+            logoData.offsetInBytes,
+            logoData.lengthInBytes,
+          ),
+        );
+      } catch (e) {
+        debugPrint('SyncManager: Error loading logoImage: $e');
+      }
 
       final helvetica = pw.Font.helvetica();
       final helveticaBold = pw.Font.helveticaBold();
@@ -299,7 +360,8 @@ class SyncManager {
         if (val == null) return "N/A";
         String s = val.toString().trim();
         if (s.isEmpty) return "N/A";
-        return s.replaceAll(RegExp(r'[^\x20-\x7E\n\r\t]+'), '').trim();
+        String res = s.replaceAll(RegExp(r'[^\x20-\x7E\n\r\t]+'), '').trim();
+        return res.isEmpty ? "N/A" : res;
       }
 
       final Map<String, String> partMap = {
@@ -360,11 +422,12 @@ class SyncManager {
         } catch (_) {}
       }
 
-      final isSealed = meta['dmg'] == 'YES';
+      final isSealed = (meta['dmg'] ?? 'YES') == 'YES';
 
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(24),
           theme: pw.ThemeData.withFont(base: helvetica, bold: helveticaBold),
           build: (pw.Context context) {
             return [
@@ -383,7 +446,7 @@ class SyncManager {
                             color: PdfColors.grey600,
                           ),
                         ),
-                        pw.SizedBox(height: 5),
+                        pw.SizedBox(height: 4),
                         pw.Text(
                           'SEALANDX INTEGRATED LOGISTICS',
                           style: pw.TextStyle(
@@ -396,18 +459,18 @@ class SyncManager {
                         pw.Text(
                           'SEAL Status Report',
                           style: pw.TextStyle(
-                            fontSize: 17,
+                            fontSize: 16,
                             fontWeight: pw.FontWeight.bold,
                             color: PdfColors.blue800,
                           ),
                         ),
                       ],
                     ),
-                    if (logoImage != null) pw.Image(logoImage, height: 70),
+                    if (logoImage != null) pw.Image(logoImage, height: 55),
                   ],
                 ),
               ),
-              pw.SizedBox(height: 10),
+              pw.SizedBox(height: 6),
               pw.Container(
                 padding: const pw.EdgeInsets.all(8),
                 decoration: pw.BoxDecoration(
@@ -438,7 +501,7 @@ class SyncManager {
                             text: pw.TextSpan(
                               children: [
                                 pw.TextSpan(
-                                  text: 'SHIPPERS: ',
+                                  text: 'SHIPPER: ',
                                   style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
                                 ),
                                 pw.TextSpan(
@@ -576,63 +639,61 @@ class SyncManager {
                 ),
               ),
               pw.Divider(thickness: 2, color: PdfColors.teal),
-              pw.SizedBox(height: 10),
+              pw.SizedBox(height: 8),
 
-              // Images Grid
+              // Images Grid (direct Wrap without pw.Center so it can span and fit on 1 page)
               if (activeParts.isNotEmpty)
-                pw.Center(
-                  child: pw.Wrap(
-                    spacing: 12,
-                    runSpacing: 12,
-                    alignment: pw.WrapAlignment.center,
-                    children: activeParts.map((p) {
-                      final image = pw.MemoryImage(p['bytes'] as Uint8List);
-                      final isRearDoor = p['id'].toString().contains('part_0') ||
-                          p['name'].toString().contains('REAR');
-                      return pw.Container(
-                        width: isRearDoor ? 500 : 260,
-                        padding: const pw.EdgeInsets.all(5),
-                        decoration: pw.BoxDecoration(
-                          border: pw.Border.all(color: PdfColors.grey300),
-                        ),
-                        child: pw.Column(
-                          crossAxisAlignment: pw.CrossAxisAlignment.start,
-                          children: [
-                            pw.Center(
-                              child: pw.Image(
-                                image,
-                                height: isRearDoor ? 350 : 180,
-                                width: isRearDoor ? 490 : 250,
-                                fit: pw.BoxFit.contain,
-                              ),
+                pw.Wrap(
+                  spacing: 12,
+                  runSpacing: 10,
+                  alignment: pw.WrapAlignment.center,
+                  children: activeParts.map((p) {
+                    final image = pw.MemoryImage(p['bytes'] as Uint8List);
+                    final isRearDoor = p['id'].toString().contains('part_0') ||
+                        p['name'].toString().contains('REAR');
+                    return pw.Container(
+                      width: isRearDoor ? 500 : 244,
+                      padding: const pw.EdgeInsets.all(5),
+                      decoration: pw.BoxDecoration(
+                        border: pw.Border.all(color: PdfColors.grey300),
+                      ),
+                      child: pw.Column(
+                        crossAxisAlignment: pw.CrossAxisAlignment.start,
+                        children: [
+                          pw.Center(
+                            child: pw.Image(
+                              image,
+                              height: isRearDoor ? 250 : 165,
+                              width: isRearDoor ? 490 : 234,
+                              fit: pw.BoxFit.contain,
                             ),
-                            pw.SizedBox(height: 5),
-                            pw.Text(
-                              p['name'].toString(),
-                              style: pw.TextStyle(
-                                fontSize: 10,
-                                fontWeight: pw.FontWeight.bold,
-                              ),
+                          ),
+                          pw.SizedBox(height: 4),
+                          pw.Text(
+                            p['name'].toString(),
+                            style: pw.TextStyle(
+                              fontSize: 10,
+                              fontWeight: pw.FontWeight.bold,
                             ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
-                  ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
                 ),
 
-              pw.SizedBox(height: 20),
+              pw.SizedBox(height: 12),
               pw.Text(
                 'REPORT CONTENT:',
                 style: pw.TextStyle(
-                  fontSize: 14,
+                  fontSize: 13,
                   fontWeight: pw.FontWeight.bold,
                   color: PdfColors.teal,
                 ),
               ),
               pw.Container(
                 width: double.infinity,
-                padding: const pw.EdgeInsets.all(10),
+                padding: const pw.EdgeInsets.all(8),
                 decoration: pw.BoxDecoration(
                   border: pw.Border.all(color: PdfColors.grey400),
                   borderRadius: const pw.BorderRadius.all(
@@ -644,23 +705,10 @@ class SyncManager {
                   style: const pw.TextStyle(fontSize: 11),
                 ),
               ),
-              pw.SizedBox(height: 10),
+              pw.SizedBox(height: 8),
               pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
-                  pw.RichText(
-                    text: pw.TextSpan(
-                      children: [
-                        pw.TextSpan(
-                          text: 'INSPECTOR: ',
-                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-                        ),
-                        pw.TextSpan(
-                          text: cleanText(meta['inspector']).toUpperCase(),
-                        ),
-                      ],
-                    ),
-                  ),
                   pw.RichText(
                     text: pw.TextSpan(
                       children: [
@@ -669,14 +717,19 @@ class SyncManager {
                           style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
                         ),
                         pw.TextSpan(
-                          text: cleanText(meta['sealingPerson']).toUpperCase(),
+                          text: cleanText(
+                            (meta['sealingPerson'] != null &&
+                                    meta['sealingPerson'].toString().trim().isNotEmpty)
+                                ? meta['sealingPerson']
+                                : meta['inspector'],
+                          ).toUpperCase(),
                         ),
                       ],
                     ),
                   ),
                 ],
               ),
-              pw.SizedBox(height: 40),
+              pw.SizedBox(height: 16),
               pw.Row(
                 children: [
                   pw.Text(

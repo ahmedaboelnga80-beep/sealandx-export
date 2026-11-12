@@ -698,11 +698,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
         itemCount: 0,
       );
 
+      final prefs = await SharedPreferences.getInstance();
+      final loggedInInspector = prefs.getString('inspector_name') ?? '';
+
       // Initialize metadata for web
       final meta = {
         'containerNo': safeName,
-        'inspector': '',
-        'sealingPerson': '',
+        'inspector': loggedInInspector,
+        'sealingPerson': loggedInInspector,
         'bookingNo': '',
         'shippers': '',
         'sealNo': '',
@@ -710,7 +713,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         'type': null,
         'line': null,
         'shippingLine': null,
-        'dmg': 'NO',
+        'dmg': 'YES',
         'createdAt': createdAt,
       };
 
@@ -750,9 +753,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     await dir.create(recursive: true);
 
-    // حفظ تاريخ الإنشاء في metadata فوراً عشان اليومية تشتغل صح
+    // حفظ بيانات الإنشاء وربط القائم بالفحص باليوزر فوراً
+    final prefs = await SharedPreferences.getInstance();
+    final loggedInInspector = prefs.getString('inspector_name') ?? '';
     final initMetaFile = File(path.join(newPath, 'metadata.json'));
-    await initMetaFile.writeAsString(jsonEncode({'createdAt': createdAt}));
+    await initMetaFile.writeAsString(jsonEncode({
+      'containerNo': safeName,
+      'inspector': loggedInInspector,
+      'sealingPerson': loggedInInspector,
+      'dmg': 'YES',
+      'createdAt': createdAt,
+    }));
 
     if (!mounted) return;
     Navigator.of(context)
@@ -841,6 +852,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
 
     try {
+      // 1. مزامنة التقارير المختارة تلقائياً مع Google Sheets ورفع الـ PDF لإنشاء الرابط في العمود M
+      for (var folder in _selectedFolders) {
+        await SyncManager.queueReport(folder.path);
+      }
+      SyncManager.syncPendingReports();
+
       final List<XFile> filesToShare = [];
       for (var folder in _selectedFolders) {
         final xfile = await _generatePdfXFile(folder);
@@ -866,28 +883,80 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<XFile?> _generatePdfXFile(ReportFolder folder) async {
     try {
-      final metaFile = File(path.join(folder.path, 'metadata.json'));
-      final reportFile = File(path.join(folder.path, 'report.txt'));
-
       Map<String, dynamic> meta = {};
-      if (await metaFile.exists()) {
-        meta = jsonDecode(await metaFile.readAsString());
-      }
-
       String reportNotes = "SEAL HAS BEEN AFFIXED";
-      if (await reportFile.exists()) {
-        reportNotes = await reportFile.readAsString();
+
+      if (kIsWeb) {
+        final boxReports = Hive.box('web_reports');
+        final rawMeta = boxReports.get(folder.path);
+        if (rawMeta != null) {
+          meta = Map<String, dynamic>.from(rawMeta as Map);
+          reportNotes = meta['report'] ?? "SEAL HAS BEEN AFFIXED";
+        }
+      } else {
+        final metaFile = File(path.join(folder.path, 'metadata.json'));
+        final reportFile = File(path.join(folder.path, 'report.txt'));
+
+        if (await metaFile.exists()) {
+          meta = jsonDecode(await metaFile.readAsString());
+        }
+
+        if (await reportFile.exists()) {
+          reportNotes = await reportFile.readAsString();
+        } else if (meta['report'] != null) {
+          reportNotes = meta['report'].toString();
+        }
       }
 
-      final imageFiles = Directory(folder.path)
-          .listSync()
-          .whereType<File>()
-          .where((f) => f.path.endsWith('.jpg'))
-          .toList();
+      final List<Map<String, dynamic>> activeImages = [];
+      if (kIsWeb) {
+        final boxImages = Hive.box('web_images');
+        for (int i = 0; i < 3; i++) {
+          final partId = 'part_$i';
+          final key = '${folder.path}_$partId';
+          if (boxImages.containsKey(key)) {
+            final base64Img = boxImages.get(key);
+            if (base64Img != null && base64Img is String) {
+              try {
+                final bytes = base64Decode(base64Img);
+                activeImages.add({
+                  'name': partId,
+                  'bytes': bytes,
+                });
+              } catch (_) {}
+            }
+          }
+        }
+      } else {
+        final dir = Directory(folder.path);
+        if (await dir.exists()) {
+          final files = dir
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.endsWith('.jpg'))
+              .toList();
+          for (var f in files) {
+            activeImages.add({
+              'name': path.basenameWithoutExtension(f.path),
+              'bytes': f.readAsBytesSync(),
+            });
+          }
+        }
+      }
 
       final pdf = pw.Document();
-      final logoData = await rootBundle.load('assets/sealand_logo.png');
-      final logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
+      pw.MemoryImage? logoImage;
+      try {
+        final logoData = await rootBundle.load('assets/sealand_logo.png');
+        logoImage = pw.MemoryImage(
+          logoData.buffer.asUint8List(
+            logoData.offsetInBytes,
+            logoData.lengthInBytes,
+          ),
+        );
+      } catch (e) {
+        debugPrint('Logo load error: $e');
+      }
 
       final helvetica = pw.Font.helvetica();
       final helveticaBold = pw.Font.helveticaBold();
@@ -897,12 +966,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
         String s = val.toString().trim();
         if (s.isEmpty) return "N/A";
         // Remove non-ASCII characters (like Arabic) to prevent squares in PDF
-        return s.replaceAll(RegExp(r'[^\x20-\x7E\n\r\t]+'), '').trim();
+        String res = s.replaceAll(RegExp(r'[^\x20-\x7E\n\r\t]+'), '').trim();
+        return res.isEmpty ? "N/A" : res;
       }
 
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(24),
           theme: pw.ThemeData.withFont(base: helvetica, bold: helveticaBold),
           build: (pw.Context context) {
             return [
@@ -941,11 +1012,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         ),
                       ],
                     ),
-                    pw.Image(logoImage, height: 70),
+                    if (logoImage != null) pw.Image(logoImage, height: 60),
                   ],
                 ),
               ),
-              pw.SizedBox(height: 10),
+              pw.SizedBox(height: 6),
               pw.Container(
                 padding: const pw.EdgeInsets.all(8),
                 decoration: pw.BoxDecoration(
@@ -954,6 +1025,68 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 ),
                 child: pw.Column(
                   children: [
+                    pw.Row(
+                      children: [
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(
+                                  text: 'BOOKING: ',
+                                  style: pw.TextStyle(
+                                    fontWeight: pw.FontWeight.bold,
+                                  ),
+                                ),
+                                pw.TextSpan(
+                                  text: cleanText(
+                                    meta['bookingNo'],
+                                  ).toUpperCase(),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(
+                                  text: 'SHIPPER: ',
+                                  style: pw.TextStyle(
+                                    fontWeight: pw.FontWeight.bold,
+                                  ),
+                                ),
+                                pw.TextSpan(
+                                  text: cleanText(
+                                    meta['shippers'],
+                                  ).toUpperCase(),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(
+                                  text: 'SEAL NO: ',
+                                  style: pw.TextStyle(
+                                    fontWeight: pw.FontWeight.bold,
+                                  ),
+                                ),
+                                pw.TextSpan(
+                                  text: cleanText(
+                                    meta['sealNo'],
+                                  ).toUpperCase(),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    pw.SizedBox(height: 6),
                     pw.Row(
                       children: [
                         pw.Expanded(
@@ -1055,62 +1188,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             text: pw.TextSpan(
                               children: [
                                 pw.TextSpan(
-                                  text: 'REFERENCE: ',
+                                  text: 'SEALED: ',
                                   style: pw.TextStyle(
                                     fontWeight: pw.FontWeight.bold,
+                                    color: (meta['dmg'] ?? 'YES') == 'YES'
+                                        ? PdfColors.green800
+                                        : PdfColors.red800,
                                   ),
                                 ),
                                 pw.TextSpan(
-                                  text: cleanText(folder.name).toUpperCase(),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    pw.SizedBox(height: 6),
-                    pw.Row(
-                      children: [
-                        pw.Expanded(
-                          child: pw.RichText(
-                            text: pw.TextSpan(
-                              children: [
-                                pw.TextSpan(
-                                  text: 'DMG STATUS: ',
+                                  text: (meta['dmg'] ?? 'YES') == 'YES'
+                                      ? 'YES'
+                                      : 'NO',
                                   style: pw.TextStyle(
                                     fontWeight: pw.FontWeight.bold,
+                                    color: (meta['dmg'] ?? 'YES') == 'YES'
+                                        ? PdfColors.green800
+                                        : PdfColors.red800,
                                   ),
-                                ),
-                                pw.TextSpan(
-                                  text: meta['dmg'] == 'YES'
-                                      ? 'DAMAGED'
-                                      : 'GOOD',
-                                  style: pw.TextStyle(
-                                    fontWeight: pw.FontWeight.bold,
-                                    color: meta['dmg'] == 'YES'
-                                        ? PdfColors.red800
-                                        : PdfColors.green800,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        pw.Expanded(
-                          child: pw.RichText(
-                            text: pw.TextSpan(
-                              children: [
-                                pw.TextSpan(
-                                  text: 'INSPECTOR: ',
-                                  style: pw.TextStyle(
-                                    fontWeight: pw.FontWeight.bold,
-                                  ),
-                                ),
-                                pw.TextSpan(
-                                  text: cleanText(
-                                    meta['inspector'],
-                                  ).toUpperCase(),
                                 ),
                               ],
                             ),
@@ -1122,20 +1217,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 ),
               ),
               pw.Divider(thickness: 2, color: PdfColors.teal),
-              pw.SizedBox(height: 10),
-              pw.Center(
-                child: pw.Wrap(
+              pw.SizedBox(height: 8),
+              if (activeImages.isNotEmpty)
+                pw.Wrap(
                   spacing: 12,
-                  runSpacing: 12,
+                  runSpacing: 10,
                   alignment: pw.WrapAlignment.center,
-                  children: imageFiles.map((f) {
-                    final image = pw.MemoryImage(f.readAsBytesSync());
-                    final baseName = path.basenameWithoutExtension(f.path);
+                  children: activeImages.map((imgItem) {
+                    final image = pw.MemoryImage(imgItem['bytes'] as Uint8List);
+                    final baseName = imgItem['name'].toString();
                     final isRear =
                         baseName.toLowerCase().contains('rear') ||
+                        baseName.toLowerCase().contains('part_0') ||
                         baseName.contains('خلفي');
                     return pw.Container(
-                      width: isRear ? 500 : 260,
+                      width: isRear ? 500 : 244,
                       padding: const pw.EdgeInsets.all(5),
                       decoration: pw.BoxDecoration(
                         border: pw.Border.all(color: PdfColors.grey300),
@@ -1145,12 +1241,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           pw.Center(
                             child: pw.Image(
                               image,
-                              height: isRear ? 350 : 180,
-                              width: isRear ? 490 : 250,
+                              height: isRear ? 250 : 165,
+                              width: isRear ? 490 : 234,
                               fit: pw.BoxFit.contain,
                             ),
                           ),
-                          pw.SizedBox(height: 5),
+                          pw.SizedBox(height: 4),
                           pw.Text(
                             (() {
                               String b = baseName.toUpperCase();
@@ -1196,8 +1292,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     );
                   }).toList(),
                 ),
-              ),
-              pw.SizedBox(height: 20),
+              pw.SizedBox(height: 12),
               pw.Text(
                 'REPORT CONTENT:',
                 style: pw.TextStyle(
@@ -1218,11 +1313,37 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 child: pw.Text(
                   reportNotes.trim().isEmpty
                       ? 'SEAL HAS BEEN AFFIXED'
-                      : reportNotes,
+                      : cleanText(reportNotes),
                   style: const pw.TextStyle(fontSize: 11),
                 ),
               ),
-              pw.SizedBox(height: 40),
+              pw.SizedBox(height: 8),
+              pw.Row(
+                children: [
+                  pw.RichText(
+                    text: pw.TextSpan(
+                      children: [
+                        pw.TextSpan(
+                          text: 'SEALING PERSON: ',
+                          style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                        ),
+                        pw.TextSpan(
+                          text: cleanText(
+                            (meta['sealingPerson'] != null &&
+                                    meta['sealingPerson']
+                                        .toString()
+                                        .trim()
+                                        .isNotEmpty)
+                                ? meta['sealingPerson']
+                                : meta['inspector'],
+                          ).toUpperCase(),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              pw.SizedBox(height: 16),
               pw.Row(
                 children: [
                   pw.Text(
@@ -1247,16 +1368,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
       );
 
-      final appDir = await getApplicationDocumentsDirectory();
+      final pdfBytes = await pdf.save();
       final String line = cleanText(meta['shippingLine']).toUpperCase();
       final String container = cleanText(meta['containerNo']).toUpperCase();
       final String fileName = 'Multi_${line}_$container.pdf'.replaceAll(
         RegExp(r'[^a-zA-Z0-9_\.-]'),
         '_',
       );
-      final file = File(path.join(appDir.path, fileName));
-      await file.writeAsBytes(await pdf.save());
-      return XFile(file.path);
+
+      if (kIsWeb) {
+        return XFile.fromData(pdfBytes, name: fileName);
+      } else {
+        final appDir = await getApplicationDocumentsDirectory();
+        final file = File(path.join(appDir.path, fileName));
+        await file.writeAsBytes(pdfBytes);
+        return XFile(file.path);
+      }
     } catch (e) {
       debugPrint('Error generating hidden PDF: $e');
       return null;
@@ -1771,8 +1898,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
             // Calculate Statistics
             int totalNum = loadedData.length;
-            int damagedNum = loadedData.where((m) => m['dmg'] == 'YES').length;
-            int healthyNum = totalNum - damagedNum;
+            int sealedNum = loadedData
+                .where((m) => (m['dmg'] ?? 'YES') == 'YES')
+                .length;
+            int notSealedNum = totalNum - sealedNum;
 
             pw.Widget buildStatBox(String label, String value, PdfColor color) {
               return pw.Column(
@@ -1813,14 +1942,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       PdfColors.blue800,
                     ),
                     buildStatBox(
-                      "GOOD",
-                      healthyNum.toString(),
+                      "SEALED",
+                      sealedNum.toString(),
                       PdfColors.green800,
                     ),
                     buildStatBox(
-                      "DAMAGED",
-                      damagedNum.toString(),
-                      PdfColors.red800,
+                      "NOT SEALED",
+                      notSealedNum.toString(),
+                      PdfColors.grey700,
                     ),
                   ],
                 ),
@@ -1947,14 +2076,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             vertical: 5,
                           ),
                           child: pw.Text(
-                            loadedData[i]['dmg'] == 'YES' ? 'YES' : 'NO',
+                            (loadedData[i]['dmg'] ?? 'YES') == 'YES' ? 'YES' : 'NO',
                             textAlign: pw.TextAlign.center,
                             style: pw.TextStyle(
                               fontSize: 7,
                               fontWeight: pw.FontWeight.bold,
-                              color: loadedData[i]['dmg'] == 'YES'
-                                  ? PdfColors.blue800
-                                  : PdfColors.grey700,
+                              color: (loadedData[i]['dmg'] ?? 'YES') == 'YES'
+                                  ? PdfColors.green800
+                                  : PdfColors.red800,
                             ),
                           ),
                         ),
@@ -2079,6 +2208,160 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     }
     SyncManager.syncPendingReports();
+  }
+
+  Future<void> _showCloudStatusDialog() async {
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final currentPending = SyncManager.pendingCount;
+          final isSyncing = SyncManager.isSyncing;
+          final error = SyncManager.lastError;
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1E2A2A),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Row(
+              children: [
+                Icon(
+                  currentPending > 0 ? Icons.cloud_sync : Icons.cloud_done,
+                  color: currentPending > 0 ? Colors.amberAccent : const Color(0xFF00BFA5),
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'حالة المزامنة السحابية',
+                  style: TextStyle(color: Colors.white, fontSize: 16),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (currentPending > 0) ...[
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.redAccent.withAlpha(40),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.redAccent),
+                          ),
+                          child: Text(
+                            '$currentPending تقارير معلقة',
+                            style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 13),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        if (isSyncing)
+                          const Row(
+                            children: [
+                              SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00BFA5))),
+                              SizedBox(width: 6),
+                              Text('جاري الإرسال...', style: TextStyle(color: Color(0xFF00BFA5), fontSize: 12)),
+                            ],
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    if (error.isNotEmpty) ...[
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.red.withAlpha(25),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.redAccent.withAlpha(80)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(Icons.error_outline, color: Colors.redAccent, size: 16),
+                                SizedBox(width: 6),
+                                Text('سبب عدم اكتمال المزامنة:', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 12)),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(error, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    const Text(
+                      'التقارير بانتظار اتصال صحيح بالسكريبت لرفع الـ PDF وكتابة الرابط في الشيت.',
+                      style: TextStyle(color: Colors.white54, fontSize: 11),
+                    ),
+                  ] else ...[
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF00BFA5).withAlpha(20),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFF00BFA5).withAlpha(80)),
+                      ),
+                      child: const Row(
+                        children: [
+                          Icon(Icons.check_circle, color: Color(0xFF00BFA5), size: 22),
+                          SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'جميع التقارير تم رفعها ومزامنتها مع Google Sheets بنجاح! ✓',
+                              style: TextStyle(color: Colors.white, fontSize: 13),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              if (currentPending > 0) ...[
+                TextButton.icon(
+                  icon: const Icon(Icons.delete_sweep, color: Colors.redAccent, size: 18),
+                  label: const Text('تصفير العلامة', style: TextStyle(color: Colors.redAccent)),
+                  onPressed: () async {
+                    await SyncManager.clearQueue();
+                    setDialogState(() {});
+                    if (mounted) setState(() {});
+                    if (ctx.mounted) Navigator.pop(ctx);
+                  },
+                ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00BFA5)),
+                  icon: const Icon(Icons.refresh, size: 16, color: Colors.white),
+                  label: const Text('إعادة المحاولة', style: TextStyle(color: Colors.white)),
+                  onPressed: () {
+                    SyncManager.syncPendingReports();
+                    setDialogState(() {});
+                    if (ctx.mounted) Navigator.pop(ctx);
+                  },
+                ),
+              ] else ...[
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('إغلاق', style: TextStyle(color: Colors.white70)),
+                ),
+              ],
+              TextButton.icon(
+                icon: const Icon(Icons.settings, color: Color(0xFF00BFA5), size: 16),
+                label: const Text('إعدادات الرابط', style: TextStyle(color: Color(0xFF00BFA5))),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _showSyncSettings();
+                },
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _showSyncSettings() async {
@@ -2251,6 +2534,51 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         prefixIcon: const Icon(Icons.settings_ethernet, color: Color(0xFF00BFA5), size: 18),
                       ),
                     ),
+                    const SizedBox(height: 8),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF1E2A2A),
+                        foregroundColor: const Color(0xFF00BFA5),
+                        side: const BorderSide(color: Color(0xFF00BFA5), width: 1),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      ),
+                      icon: const Icon(Icons.wifi_find, size: 14),
+                      label: const Text('اختبار اتصال رابط السكريبت أونلاين', style: TextStyle(fontSize: 11)),
+                      onPressed: () async {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('جاري فحص الاتصال بالرابط...'), duration: Duration(seconds: 1)),
+                        );
+                        final testRes = await SyncManager.testConnection(scriptUrlController.text.trim());
+                        if (ctx.mounted) {
+                          showDialog(
+                            context: ctx,
+                            builder: (c) => AlertDialog(
+                              backgroundColor: const Color(0xFF1E2A2A),
+                              title: Row(
+                                children: [
+                                  Icon(
+                                    testRes['success'] == true ? Icons.check_circle : Icons.warning_amber,
+                                    color: testRes['success'] == true ? const Color(0xFF00BFA5) : Colors.orangeAccent,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    testRes['success'] == true ? 'الاتصال ناجح ✓' : 'تنبيه الاتصال',
+                                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                                  ),
+                                ],
+                              ),
+                              content: Text(
+                                testRes['message'] ?? '',
+                                style: const TextStyle(color: Colors.white70, fontSize: 13),
+                              ),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.pop(c), child: const Text('حسناً')),
+                              ],
+                            ),
+                          );
+                        }
+                      },
+                    ),
                     const SizedBox(height: 10),
                     const Text(
                       'رابط Firebase RTDB للمتابعة:',
@@ -2285,6 +2613,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       '💡 ضع رابط شيت جوجل وسيقوم التطبيق بإضافة الصفوف تلقائياً مع رفع صور الـ PDF إلى Google Drive وإرفاق رابطها.',
                       style: TextStyle(color: Colors.white54, fontSize: 11),
                     ),
+                  ),
+                  ValueListenableBuilder<int>(
+                    valueListenable: SyncManager.pendingSyncsNotifier,
+                    builder: (context, pendingCount, _) {
+                      if (pendingCount == 0) return const SizedBox.shrink();
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.redAccent,
+                            side: const BorderSide(color: Colors.redAccent),
+                          ),
+                          icon: const Icon(Icons.delete_sweep, size: 16),
+                          label: Text('تصفير التقارير المعلقة ($pendingCount) ومسح العلامة', style: const TextStyle(fontSize: 12)),
+                          onPressed: () async {
+                            await SyncManager.clearQueue();
+                            setDialogState(() {});
+                            if (mounted) setState(() {});
+                          },
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
@@ -2435,22 +2785,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   valueListenable: SyncManager.pendingSyncsNotifier,
                   builder: (context, pending, _) {
                     return GestureDetector(
-                      onTap: () {
-                        SyncManager.syncPendingReports();
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              pending > 0
-                                  ? 'جاري إعادة محاولة مزامنة $pending تقرير إلى Google Sheets...'
-                                  : 'كل التقارير تمت مزامنتها بنجاح ✓',
-                            ),
-                            backgroundColor: pending > 0
-                                ? Colors.orange
-                                : const Color(0xFF00BFA5),
-                            duration: const Duration(seconds: 2),
-                          ),
-                        );
-                      },
+                      onTap: _showCloudStatusDialog,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 4),
                         child: Column(
@@ -2904,6 +3239,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _generateWordXFile(ReportFolder folder) async {
     setState(() => _isLoading = true);
     try {
+      // مزامنة التقرير سحابياً تلقائياً
+      await SyncManager.queueReport(folder.path);
+      SyncManager.syncPendingReports();
+
       final metaFile = File(path.join(folder.path, 'metadata.json'));
       final reportFile = File(path.join(folder.path, 'report.txt'));
       Map<String, dynamic> meta = {};
@@ -2957,13 +3296,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
       buffer.write("<table>");
       buffer.write(
-        "<tr><td class='key'>CONTAINER:</td><td>${(meta['containerNo'] ?? 'N/A').toString().toUpperCase()}</td><td class='key'>SIZE:</td><td>${(meta['size'] ?? 'N/A').toString().toUpperCase()}</td></tr>",
+        "<tr><td class='key'>BOOKING:</td><td>${(meta['bookingNo'] ?? 'N/A').toString().toUpperCase()}</td><td class='key'>SHIPPER:</td><td>${(meta['shippers'] ?? 'N/A').toString().toUpperCase()}</td></tr>",
       );
       buffer.write(
-        "<tr><td class='key'>LOCATION:</td><td>${(meta['location'] ?? 'N/A').toString().toUpperCase()}</td><td class='key'>DATE:</td><td>${DateFormat('yyyy-MM-dd').format(folder.modified)}</td></tr>",
+        "<tr><td class='key'>SEAL NO:</td><td>${(meta['sealNo'] ?? 'N/A').toString().toUpperCase()}</td><td class='key'>CONTAINER:</td><td>${(meta['containerNo'] ?? 'N/A').toString().toUpperCase()}</td></tr>",
       );
       buffer.write(
-        "<tr><td class='key'>DMG STATUS:</td><td colspan='3' style='color:${meta['dmg'] == 'YES' ? 'red' : 'green'}; font-weight:bold;'>${meta['dmg'] == 'YES' ? 'DAMAGED' : 'GOOD'}</td></tr>",
+        "<tr><td class='key'>SIZE:</td><td>${(meta['size'] ?? 'N/A').toString().toUpperCase()}</td><td class='key'>TYPE:</td><td>${(meta['type'] ?? 'N/A').toString().toUpperCase()}</td></tr>",
+      );
+      buffer.write(
+        "<tr><td class='key'>LOCATION:</td><td>${(meta['line'] ?? meta['location'] ?? 'N/A').toString().toUpperCase()}</td><td class='key'>DATE:</td><td>${DateFormat('yyyy-MM-dd').format(folder.modified)}</td></tr>",
+      );
+      buffer.write(
+        "<tr><td class='key'>SEALED:</td><td colspan='3' style='color:${(meta['dmg'] ?? 'YES') == 'YES' ? 'green' : 'red'}; font-weight:bold;'>${(meta['dmg'] ?? 'YES') == 'YES' ? 'YES' : 'NO'}</td></tr>",
       );
       buffer.write("</table>");
 
@@ -3132,17 +3477,21 @@ class _AlbumScreenState extends State<AlbumScreen> {
     );
 
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final loggedInInspector = prefs.getString('inspector_name') ?? '';
+
       if (kIsWeb) {
         final boxReports = Hive.box('web_reports');
         final rawMeta = boxReports.get(_currentFolderPath);
         if (rawMeta != null) {
           final data = Map<String, dynamic>.from(rawMeta as Map);
           _containerNoController.text = data['containerNo'] ?? '';
-          final prefs = await SharedPreferences.getInstance();
-          _inspectorController.text =
-              data['inspector'] ?? prefs.getString('inspector_name') ?? '';
-          _sealingPersonController.text =
-              data['sealingPerson'] ?? prefs.getString('inspector_name') ?? '';
+          _inspectorController.text = (data['inspector']?.toString().trim().isNotEmpty == true)
+              ? data['inspector']
+              : loggedInInspector;
+          _sealingPersonController.text = (data['sealingPerson']?.toString().trim().isNotEmpty == true)
+              ? data['sealingPerson']
+              : loggedInInspector;
           _bookingNoController.text = data['bookingNo'] ?? '';
           _shippersController.text = data['shippers'] ?? '';
           _sealNoController.text = data['sealNo'] ?? '';
@@ -3151,7 +3500,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
           _selectedType = data['type'];
           _selectedLine = data['line'];
           _selectedShippingLine = data['shippingLine'];
-          _selectedDMG = data['dmg'];
+          _selectedDMG = data['dmg'] ?? 'YES';
         }
 
         final boxImages = Hive.box('web_images');
@@ -3178,13 +3527,12 @@ class _AlbumScreenState extends State<AlbumScreen> {
           try {
             final data = jsonDecode(await metaFile.readAsString());
             _containerNoController.text = data['containerNo'] ?? '';
-            final prefs = await SharedPreferences.getInstance();
-            _inspectorController.text =
-                data['inspector'] ?? prefs.getString('inspector_name') ?? '';
-            _sealingPersonController.text =
-                data['sealingPerson'] ??
-                prefs.getString('inspector_name') ??
-                '';
+            _inspectorController.text = (data['inspector']?.toString().trim().isNotEmpty == true)
+                ? data['inspector']
+                : loggedInInspector;
+            _sealingPersonController.text = (data['sealingPerson']?.toString().trim().isNotEmpty == true)
+                ? data['sealingPerson']
+                : loggedInInspector;
             _bookingNoController.text = data['bookingNo'] ?? '';
             _shippersController.text = data['shippers'] ?? '';
             _sealNoController.text = data['sealNo'] ?? '';
@@ -3192,7 +3540,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
             _selectedType = data['type'];
             _selectedLine = data['line'];
             _selectedShippingLine = data['shippingLine'];
-            _selectedDMG = data['dmg'];
+            _selectedDMG = data['dmg'] ?? 'YES';
           } catch (_) {}
         }
 
@@ -3206,6 +3554,17 @@ class _AlbumScreenState extends State<AlbumScreen> {
             loadedParts[i].image = imgFile;
           }
         }
+      }
+
+      // Ensure controllers and fields have logged-in inspector by default
+      if (_sealingPersonController.text.trim().isEmpty) {
+        _sealingPersonController.text = loggedInInspector;
+      }
+      if (_inspectorController.text.trim().isEmpty) {
+        _inspectorController.text = loggedInInspector;
+      }
+      if (_selectedDMG == null || _selectedDMG!.isEmpty) {
+        _selectedDMG = 'YES';
       }
     } catch (e) {
       debugPrint('Init parts error: $e');
@@ -3226,19 +3585,28 @@ class _AlbumScreenState extends State<AlbumScreen> {
       final String createdAt =
           existingMeta['createdAt'] ?? DateTime.now().toIso8601String();
 
+      final prefs = await SharedPreferences.getInstance();
+      final loggedInInspector = prefs.getString('inspector_name') ?? '';
+      final sealingPersonVal = _sealingPersonController.text.trim().isNotEmpty
+          ? _sealingPersonController.text.trim()
+          : loggedInInspector;
+      final inspectorVal = _inspectorController.text.trim().isNotEmpty
+          ? _inspectorController.text.trim()
+          : sealingPersonVal;
+
       final meta = {
-        'containerNo': _containerNoController.text,
-        'inspector': _inspectorController.text,
-        'sealingPerson': _sealingPersonController.text,
-        'bookingNo': _bookingNoController.text,
-        'shippers': _shippersController.text,
-        'sealNo': _sealNoController.text,
+        'containerNo': _containerNoController.text.trim(),
+        'inspector': inspectorVal,
+        'sealingPerson': sealingPersonVal,
+        'bookingNo': _bookingNoController.text.trim(),
+        'shippers': _shippersController.text.trim(),
+        'sealNo': _sealNoController.text.trim(),
         'size': _selectedSize,
         'type': _selectedType,
         'line': _selectedLine,
         'shippingLine': _selectedShippingLine,
-        'dmg': _selectedDMG,
-        'report': _reportController.text,
+        'dmg': _selectedDMG ?? 'YES',
+        'report': _reportController.text.trim(),
         'createdAt': createdAt,
       };
 
@@ -3339,18 +3707,27 @@ class _AlbumScreenState extends State<AlbumScreen> {
       } catch (_) {}
     }
 
+    final prefs = await SharedPreferences.getInstance();
+    final loggedInInspector = prefs.getString('inspector_name') ?? '';
+    final sealingPersonVal = _sealingPersonController.text.trim().isNotEmpty
+        ? _sealingPersonController.text.trim()
+        : loggedInInspector;
+    final inspectorVal = _inspectorController.text.trim().isNotEmpty
+        ? _inspectorController.text.trim()
+        : sealingPersonVal;
+
     final metaData = {
-      'containerNo': _containerNoController.text,
-      'inspector': _inspectorController.text,
-      'sealingPerson': _sealingPersonController.text,
-      'bookingNo': _bookingNoController.text,
-      'shippers': _shippersController.text,
-      'sealNo': _sealNoController.text,
+      'containerNo': _containerNoController.text.trim(),
+      'inspector': inspectorVal,
+      'sealingPerson': sealingPersonVal,
+      'bookingNo': _bookingNoController.text.trim(),
+      'shippers': _shippersController.text.trim(),
+      'sealNo': _sealNoController.text.trim(),
       'size': _selectedSize,
       'type': _selectedType,
       'line': _selectedLine,
       'shippingLine': _selectedShippingLine,
-      'dmg': _selectedDMG,
+      'dmg': _selectedDMG ?? 'YES',
       // الحفاظ على createdAt الأصلي - لو مش موجود نحطه دلوقتي
       'createdAt': existingCreatedAt ?? DateTime.now().toIso8601String(),
     };
@@ -3889,6 +4266,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(24),
           theme: pw.ThemeData.withFont(base: helvetica, bold: helveticaBold),
           build: (pw.Context context) {
             return [
@@ -3966,7 +4344,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
                             text: pw.TextSpan(
                               children: [
                                 pw.TextSpan(
-                                  text: 'SHIPPERS: ',
+                                  text: 'SHIPPER: ',
                                   style: pw.TextStyle(
                                     fontWeight: pw.FontWeight.bold,
                                   ),
@@ -4133,61 +4511,59 @@ class _AlbumScreenState extends State<AlbumScreen> {
               pw.SizedBox(height: 10),
 
               // Images Grid
-              pw.Center(
-                child: pw.Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  alignment: pw.WrapAlignment.center,
-                  children: _parts
-                      .where(
-                        (p) => (kIsWeb
-                            ? p.webImageBytes != null
-                            : p.image != null),
-                      )
-                      .map((p) {
-                        final image = pw.MemoryImage(
-                          kIsWeb
-                              ? p.webImageBytes!
-                              : p.image!.readAsBytesSync(),
-                        );
-                        final isRearDoor =
-                            p.name.contains('الأبواب الخلفية') ||
-                            p.name.contains('Rear');
-                        return pw.Container(
-                          width: isRearDoor ? 500 : 260,
-                          padding: const pw.EdgeInsets.all(5),
-                          decoration: pw.BoxDecoration(
-                            border: pw.Border.all(color: PdfColors.grey300),
-                          ),
-                          child: pw.Column(
-                            crossAxisAlignment: pw.CrossAxisAlignment.start,
-                            children: [
-                              pw.Center(
-                                child: pw.Image(
-                                  image,
-                                  height: isRearDoor ? 350 : 180,
-                                  width: isRearDoor ? 490 : 250,
-                                  fit: pw.BoxFit.contain,
-                                ),
+              pw.Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                alignment: pw.WrapAlignment.center,
+                children: _parts
+                    .where(
+                      (p) => (kIsWeb
+                          ? p.webImageBytes != null
+                          : p.image != null),
+                    )
+                    .map((p) {
+                      final image = pw.MemoryImage(
+                        kIsWeb
+                            ? p.webImageBytes!
+                            : p.image!.readAsBytesSync(),
+                      );
+                      final isRearDoor =
+                          p.name.contains('الأبواب الخلفية') ||
+                          p.name.contains('Rear');
+                      return pw.Container(
+                        width: isRearDoor ? 500 : 244,
+                        padding: const pw.EdgeInsets.all(5),
+                        decoration: pw.BoxDecoration(
+                          border: pw.Border.all(color: PdfColors.grey300),
+                        ),
+                        child: pw.Column(
+                          crossAxisAlignment: pw.CrossAxisAlignment.start,
+                          children: [
+                            pw.Center(
+                              child: pw.Image(
+                                image,
+                                height: isRearDoor ? 250 : 165,
+                                width: isRearDoor ? 490 : 234,
+                                fit: pw.BoxFit.contain,
                               ),
-                              pw.SizedBox(height: 5),
-                              pw.Text(
-                                partMap[p.name] ??
-                                    cleanText(p.name).toUpperCase(),
-                                style: pw.TextStyle(
-                                  fontSize: 10,
-                                  fontWeight: pw.FontWeight.bold,
-                                ),
+                            ),
+                            pw.SizedBox(height: 4),
+                            pw.Text(
+                              partMap[p.name] ??
+                                  cleanText(p.name).toUpperCase(),
+                              style: pw.TextStyle(
+                                fontSize: 10,
+                                fontWeight: pw.FontWeight.bold,
                               ),
-                            ],
-                          ),
-                        );
-                      })
-                      .toList(),
-                ),
+                            ),
+                          ],
+                        ),
+                      );
+                    })
+                    .toList(),
               ),
 
-              pw.SizedBox(height: 20),
+              pw.SizedBox(height: 12),
               pw.Text(
                 'REPORT CONTENT:',
                 style: pw.TextStyle(
@@ -4224,18 +4600,17 @@ class _AlbumScreenState extends State<AlbumScreen> {
                           style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
                         ),
                         pw.TextSpan(
-                          text: _sealingPersonController.text.isEmpty
-                              ? '________________'
-                              : cleanText(
-                                  _sealingPersonController.text,
-                                ).toUpperCase(),
+                          text: (_sealingPersonController.text.trim().isNotEmpty
+                                  ? cleanText(_sealingPersonController.text)
+                                  : cleanText(_inspectorController.text))
+                              .toUpperCase(),
                         ),
                       ],
                     ),
                   ),
                 ],
               ),
-              pw.SizedBox(height: 40),
+              pw.SizedBox(height: 16),
               pw.Row(
                 children: [
                   pw.Text(
@@ -4643,21 +5018,21 @@ class _AlbumScreenState extends State<AlbumScreen> {
                                       SegmentedButton<String>(
                                         segments: const [
                                           ButtonSegment(
-                                            value: 'NO',
-                                            label: Text('NO'),
+                                            value: 'YES',
+                                            label: Text('YES'),
                                             icon: Icon(
                                               Icons.check_circle_outline,
                                             ),
                                           ),
                                           ButtonSegment(
-                                            value: 'YES',
-                                            label: Text('YES'),
+                                            value: 'NO',
+                                            label: Text('NO'),
                                             icon: Icon(
-                                              Icons.warning_amber_rounded,
+                                              Icons.cancel_outlined,
                                             ),
                                           ),
                                         ],
-                                        selected: {_selectedDMG ?? 'NO'},
+                                        selected: {_selectedDMG ?? 'YES'},
                                         onSelectionChanged:
                                             (Set<String> newSelection) {
                                               setState(() {
@@ -4669,12 +5044,12 @@ class _AlbumScreenState extends State<AlbumScreen> {
                                         style: SegmentedButton.styleFrom(
                                           selectedBackgroundColor:
                                               _selectedDMG == 'YES'
-                                              ? Colors.red.withAlpha(77)
-                                              : Colors.green.withAlpha(77),
+                                              ? Colors.green.withAlpha(77)
+                                              : Colors.red.withAlpha(77),
                                           selectedForegroundColor:
                                               _selectedDMG == 'YES'
-                                              ? Colors.red
-                                              : Colors.green,
+                                              ? Colors.green
+                                              : Colors.red,
                                         ),
                                       ),
                                     ],
@@ -5976,6 +6351,7 @@ class _PscchcSearchTabState extends State<PscchcSearchTab> {
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(24),
           theme: pw.ThemeData.withFont(base: helvetica, bold: helveticaBold),
           build: (pw.Context context) {
             return [
