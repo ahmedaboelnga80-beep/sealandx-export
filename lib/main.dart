@@ -2725,6 +2725,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 ? Text('${_selectedFolders.length} مختار')
                 : _currentTab == 1
                 ? const Text('بحث واستعلام PSCCHC', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18))
+                : _currentTab == 2
+                ? const Text('بحث واستعلام بوكينج MSC', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18))
                 : _isSearching
                 ? TextField(
                     controller: _searchController,
@@ -2808,7 +2810,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onPressed: _deleteSelectedFolders,
                   tooltip: 'حذف المختار',
                 ),
-              ] else if (_currentTab == 1) ...[
+              ] else if (_currentTab == 1 || _currentTab == 2) ...[
                 IconButton(
                   icon: const Icon(Icons.logout, color: Colors.redAccent),
                   onPressed: widget.onLogout,
@@ -2933,6 +2935,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
           body: _currentTab == 1
               ? const PscchcSearchTab()
+              : _currentTab == 2
+              ? const MscBookingSearchTab()
               : _isLoading
               ? const Center(child: CircularProgressIndicator())
               : _folders.isEmpty
@@ -3095,7 +3099,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     })(),
                   ),
                 ),
-          floatingActionButton: _currentTab == 1
+          floatingActionButton: _currentTab != 0
               ? null
               : FloatingActionButton.extended(
                   onPressed: _createNewReport,
@@ -3123,6 +3127,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
               BottomNavigationBarItem(
                 icon: Icon(Icons.search),
                 label: 'بحث PSCCHC',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.directions_boat),
+                label: 'بحث بوكينج MSC',
               ),
             ],
           ),
@@ -6348,10 +6356,32 @@ class _PscchcSearchTabState extends State<PscchcSearchTab> {
         csvBuffer.writeln();
       }
 
-      final appDir = await getAppDirectory();
       final containerNo = master.isNotEmpty ? (master[0]['containerNo'] ?? _searchController.text.trim().toUpperCase()) : _searchController.text.trim().toUpperCase();
       final String fileName = 'PSCCHC_Trace_$containerNo.csv'.replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
 
+      if (kIsWeb) {
+        final bytes = Uint8List.fromList(utf8.encode(csvBuffer.toString()));
+        await Share.shareXFiles([XFile.fromData(bytes, name: fileName, mimeType: 'text/csv')], text: 'PSCCHC Trace for Container $containerNo');
+        return;
+      }
+
+      if (!kIsWeb && Platform.isWindows) {
+        String? selectedPath = await FilePicker.platform.saveFile(
+          dialogTitle: 'حفظ ملف الإكسيل (CSV)',
+          fileName: fileName,
+          type: FileType.custom,
+          allowedExtensions: ['csv'],
+        );
+        if (selectedPath != null) {
+          await File(selectedPath).writeAsString(csvBuffer.toString(), encoding: utf8);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم حفظ الملف في: $selectedPath')));
+          }
+        }
+        return;
+      }
+
+      final appDir = await getAppDirectory();
       final file = File(path.join(appDir.path, fileName));
       await file.writeAsString(csvBuffer.toString(), encoding: utf8);
 
@@ -6561,10 +6591,33 @@ class _PscchcSearchTabState extends State<PscchcSearchTab> {
         ),
       );
 
-      final appDir = await getAppDirectory();
       final String fileName = 'PSCCHC_Trace_$containerNo.pdf'.replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
+      final pdfBytes = await pdf.save();
+
+      if (kIsWeb) {
+        await Printing.sharePdf(bytes: pdfBytes, filename: fileName);
+        return;
+      }
+
+      if (!kIsWeb && Platform.isWindows) {
+        String? selectedPath = await FilePicker.platform.saveFile(
+          dialogTitle: 'حفظ تقرير الـ PDF',
+          fileName: fileName,
+          type: FileType.custom,
+          allowedExtensions: ['pdf'],
+        );
+        if (selectedPath != null) {
+          await File(selectedPath).writeAsBytes(pdfBytes);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم حفظ التقرير في: $selectedPath')));
+          }
+        }
+        return;
+      }
+
+      final appDir = await getAppDirectory();
       final file = File(path.join(appDir.path, fileName));
-      await file.writeAsBytes(await pdf.save());
+      await file.writeAsBytes(pdfBytes);
 
       await Share.shareXFiles([XFile(file.path)], text: 'PSCCHC Trace for Container $containerNo');
     } catch (e) {
@@ -6876,6 +6929,1053 @@ class _PscchcSearchTabState extends State<PscchcSearchTab> {
           ],
         );
       }).toList(),
+    );
+  }
+}
+
+// -------------------- MSC BOOKING SEARCH TAB --------------------
+
+class MscBookingSearchTab extends StatefulWidget {
+  const MscBookingSearchTab({super.key});
+
+  @override
+  State<MscBookingSearchTab> createState() => _MscBookingSearchTabState();
+}
+
+class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
+  final TextEditingController _searchController = TextEditingController();
+  bool _loading = false;
+  String _errorMessage = '';
+  Map<String, dynamic>? _trackingData;
+
+  Future<Map<String, dynamic>?> _queryMscApi(String trackingNumber, String trackingMode) async {
+    const mscUrl = 'https://www.msc.com/api/feature/tools/TrackingInfo';
+    try {
+      final response = await http
+          .post(
+            Uri.parse(mscUrl),
+            headers: {
+              'X-Requested-With': 'XMLHttpRequest',
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            },
+            body: jsonEncode({
+              'trackingNumber': trackingNumber,
+              'trackingMode': trackingMode,
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body) as Map<String, dynamic>;
+      }
+    } catch (e) {
+      debugPrint('Direct MSC API query note: $e');
+    }
+
+    // Fallback via Google Apps Script proxy (useful for Web CORS if needed)
+    try {
+      final settingsBox = Hive.box('settings');
+      String scriptUrl = settingsBox.get('sync_apps_script_url', defaultValue: '') as String;
+      if (scriptUrl.trim().isEmpty) {
+        scriptUrl = 'https://script.google.com/macros/s/AKfycbxWLxlMvOvCQ43r2yWQ8DYkHhZm-tlNLw_eizT1BUaJVxaL7bcq6uN-p1PnMQ30SUoN/exec';
+      }
+      final proxyRes = await http
+          .post(
+            Uri.parse(scriptUrl),
+            headers: {'Content-Type': 'text/plain;charset=utf-8'},
+            body: jsonEncode({
+              'action': 'mscTrack',
+              'trackingNumber': trackingNumber,
+              'trackingMode': trackingMode,
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+      if (proxyRes.statusCode == 200) {
+        return jsonDecode(proxyRes.body) as Map<String, dynamic>;
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  Future<void> _fetchBookingData() async {
+    final query = _searchController.text.trim().toUpperCase().replaceAll(' ', '');
+    if (query.isEmpty) {
+      setState(() {
+        _errorMessage = 'برجاء إدخال رقم البوكينج أولاً (مثال: EBKG19278768)';
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _errorMessage = '';
+      _trackingData = null;
+    });
+
+    try {
+      // 1. Try Booking Number mode ("1") first
+      Map<String, dynamic>? res = await _queryMscApi(query, '1');
+      bool hasBls = res != null &&
+          res['IsSuccess'] == true &&
+          res['Data'] != null &&
+          (res['Data']['BillOfLadings'] as List? ?? []).isNotEmpty;
+
+      // 2. Fallback to Container / Bill of Lading mode ("0") if not found as Booking
+      if (!hasBls) {
+        final fallbackRes = await _queryMscApi(query, '0');
+        final fallbackHasBls = fallbackRes != null &&
+            fallbackRes['IsSuccess'] == true &&
+            fallbackRes['Data'] != null &&
+            (fallbackRes['Data']['BillOfLadings'] as List? ?? []).isNotEmpty;
+        if (fallbackHasBls) {
+          res = fallbackRes;
+          hasBls = true;
+        }
+      }
+
+      if (hasBls && res != null) {
+        final rawData = res['Data'];
+        setState(() {
+          _trackingData = Map<String, dynamic>.from(rawData as Map);
+          _loading = false;
+        });
+      } else {
+        setState(() {
+          _errorMessage = 'لم يتم العثور على حاويات أو بيانات لهذا الرقم ($query) على موقع MSC';
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'تعذر الاتصال بخدمة تتبع MSC: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  Map<String, dynamic> _parseContainerInfo(Map<String, dynamic> c, String blNo, Map<String, dynamic> genInfo) {
+    final String containerNo = (c['ContainerNumber'] ?? '-').toString();
+    final String containerType = (c['ContainerType'] ?? '-').toString();
+    final String latestMove = (c['LatestMove'] ?? '-').toString();
+    final String podEta = (c['PodEtaDate'] ?? genInfo['FinalPodEtaDate'] ?? '-').toString();
+    final bool delivered = c['Delivered'] == true;
+    final List events = (c['Events'] as List? ?? []);
+
+    String emptyDate = '-';
+    String cyInDate = '-';
+    String loadedDate = '-';
+    String vesselName = '-';
+    String voyageNo = '-';
+    String terminalName = '-';
+    String latestStatusDesc = '-';
+    String latestStatusDate = '-';
+
+    for (var ev in events) {
+      final desc = (ev['Description'] ?? '').toString();
+      final descLower = desc.toLowerCase();
+      final dt = (ev['Date'] ?? '').toString();
+      final details = (ev['Detail'] as List? ?? []).map((e) => e.toString()).toList();
+      final equip = ev['EquipmentHandling'] as Map?;
+      final eqName = (equip?['Name'] ?? '').toString();
+      final eqSmdg = (equip?['Smdg'] ?? '').toString();
+
+      if (latestStatusDesc == '-' && !descLower.contains('estimated')) {
+        latestStatusDesc = desc;
+        latestStatusDate = dt;
+      }
+
+      if (descLower.contains('empty to shipper') && emptyDate == '-') {
+        emptyDate = dt;
+      }
+      if ((descLower.contains('received at cy') || descLower.contains('gate in')) && cyInDate == '-') {
+        cyInDate = dt;
+      }
+      if (descLower.contains('loaded') && loadedDate == '-') {
+        loadedDate = dt;
+        if (details.isNotEmpty) vesselName = details[0];
+        if (details.length > 1) voyageNo = details[1];
+      }
+
+      if (vesselName == '-' && details.length >= 2 && !details[0].contains('EMPTY') && !details[0].contains('LADEN')) {
+        vesselName = details[0];
+        voyageNo = details[1];
+      }
+
+      if (terminalName == '-' && (eqSmdg.isNotEmpty || eqName.isNotEmpty)) {
+        if (eqName.toUpperCase().contains('PSCCHC') || eqSmdg.toUpperCase().contains('PSCCH')) {
+          terminalName = 'PSCCHC';
+        } else if (eqName.isNotEmpty) {
+          terminalName = eqName;
+        }
+      }
+    }
+
+    if (latestStatusDesc == '-' && events.isNotEmpty) {
+      latestStatusDesc = (events.first['Description'] ?? '-').toString();
+      latestStatusDate = (events.first['Date'] ?? '-').toString();
+    }
+
+    return {
+      'containerNo': containerNo,
+      'containerType': containerType,
+      'blNo': blNo,
+      'latestMove': latestMove,
+      'podEta': podEta,
+      'delivered': delivered,
+      'emptyDate': emptyDate,
+      'cyInDate': cyInDate,
+      'loadedDate': loadedDate,
+      'vesselName': vesselName,
+      'voyageNo': voyageNo,
+      'vesselVoyage': vesselName != '-' ? '$vesselName${voyageNo != '-' ? ' / $voyageNo' : ''}' : '-',
+      'terminalName': terminalName,
+      'latestStatusDesc': latestStatusDesc,
+      'latestStatusDate': latestStatusDate,
+      'events': events,
+    };
+  }
+
+  List<Map<String, dynamic>> _getAllParsedContainers() {
+    if (_trackingData == null) return [];
+    final List bls = _trackingData!['BillOfLadings'] as List? ?? [];
+    final List<Map<String, dynamic>> result = [];
+    for (var bl in bls) {
+      final blMap = Map<String, dynamic>.from(bl as Map);
+      final String blNo = (blMap['BillOfLadingNumber'] ?? '-').toString();
+      final Map<String, dynamic> genInfo = blMap['GeneralTrackingInfo'] != null
+          ? Map<String, dynamic>.from(blMap['GeneralTrackingInfo'] as Map)
+          : {};
+      final List containers = blMap['ContainersInfo'] as List? ?? [];
+      for (var c in containers) {
+        result.add(_parseContainerInfo(Map<String, dynamic>.from(c as Map), blNo, genInfo));
+      }
+    }
+    return result;
+  }
+
+  Map<String, String> _getBookingHeaderSummary() {
+    if (_trackingData == null) return {};
+    final String trackingNo = (_trackingData!['TrackingNumber'] ?? _searchController.text.trim().toUpperCase()).toString();
+    final String trackingType = (_trackingData!['TrackingType'] ?? 'Booking Number').toString();
+    final List bls = _trackingData!['BillOfLadings'] as List? ?? [];
+    final Map<String, dynamic> firstBl = bls.isNotEmpty ? Map<String, dynamic>.from(bls.first as Map) : {};
+    final String blNo = (firstBl['BillOfLadingNumber'] ?? '-').toString();
+    final Map<String, dynamic> gen = firstBl['GeneralTrackingInfo'] != null
+        ? Map<String, dynamic>.from(firstBl['GeneralTrackingInfo'] as Map)
+        : {};
+    final List transList = gen['Transshipments'] as List? ?? [];
+    final String transshipments = transList.isNotEmpty ? transList.join(' / ') : '-';
+    final allContainers = _getAllParsedContainers();
+
+    String vesselVoyage = '-';
+    String terminal = '-';
+    for (var c in allContainers) {
+      if (vesselVoyage == '-' && c['vesselVoyage'] != '-') {
+        vesselVoyage = c['vesselVoyage'].toString();
+      }
+      if (terminal == '-' && c['terminalName'] != '-') {
+        terminal = c['terminalName'].toString();
+      }
+    }
+
+    return {
+      'trackingNo': trackingNo,
+      'trackingType': trackingType,
+      'blNo': blNo,
+      'totalContainers': '${allContainers.length}',
+      'portOfLoad': (gen['PortOfLoad'] ?? gen['ShippedFrom'] ?? '-').toString(),
+      'portOfDischarge': (gen['PortOfDischarge'] ?? gen['ShippedTo'] ?? '-').toString(),
+      'transshipments': transshipments,
+      'priceCalcDate': (gen['PriceCalculationDate'] ?? '-').toString(),
+      'finalEta': (gen['FinalPodEtaDate'] ?? '-').toString(),
+      'vesselVoyage': vesselVoyage,
+      'terminal': terminal,
+    };
+  }
+
+  Future<void> _copyContainerNumbers() async {
+    final containers = _getAllParsedContainers();
+    if (containers.isEmpty) return;
+    final text = containers.map((c) => c['containerNo'].toString()).join('\n');
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✓ تم نسخ أرقام ${containers.length} حاويات إلى الحافظة'),
+          backgroundColor: const Color(0xFF00BFA5),
+        ),
+      );
+    }
+  }
+
+  Future<void> _exportBookingToExcel() async {
+    if (_trackingData == null) return;
+    try {
+      final summary = _getBookingHeaderSummary();
+      final containers = _getAllParsedContainers();
+      final bookingNo = summary['trackingNo'] ?? 'BOOKING';
+
+      final csv = StringBuffer();
+      csv.write('\uFEFF'); // UTF-8 BOM for Excel
+
+      csv.writeln('--- MSC BOOKING & SHIPMENT SUMMARY ---');
+      csv.writeln('BOOKING_NO,BL_NO,TOTAL_CONTAINERS,PORT_OF_LOAD,PORT_OF_DISCHARGE,TRANSSHIPMENT,VESSEL_VOYAGE,PRICE_CALC_DATE,FINAL_POD_ETA');
+      csv.writeln(
+        '"${summary['trackingNo']}","${summary['blNo']}","${summary['totalContainers']}","${summary['portOfLoad']}","${summary['portOfDischarge']}","${summary['transshipments']}","${summary['vesselVoyage']}","${summary['priceCalcDate']}","${summary['finalEta']}"',
+      );
+      csv.writeln();
+
+      csv.writeln('--- CONTAINERS LIST IN BOOKING ($bookingNo) ---');
+      csv.writeln('NO,BOOKING_NO,BL_NO,CONTAINER_NO,SIZE_TYPE,EMPTY_TO_SHIPPER,RECEIVED_AT_CY,LOADED_ON_VESSEL,VESSEL,VOYAGE,TERMINAL,LATEST_STATUS,LATEST_DATE,POD_ETA');
+      for (int i = 0; i < containers.length; i++) {
+        final c = containers[i];
+        csv.writeln(
+          '${i + 1},"$bookingNo","${c['blNo']}","${c['containerNo']}","${c['containerType']}","${c['emptyDate']}","${c['cyInDate']}","${c['loadedDate']}","${c['vesselName']}","${c['voyageNo']}","${c['terminalName']}","${c['latestStatusDesc']}","${c['latestStatusDate']}","${c['podEta']}"',
+        );
+      }
+      csv.writeln();
+
+      csv.writeln('--- DETAILED CONTAINER MOVEMENTS ---');
+      csv.writeln('CONTAINER_NO,ORDER,DATE,LOCATION,UN_CODE,DESCRIPTION,VESSEL_DETAIL,VOYAGE_DETAIL,TERMINAL_NAME,SMDG');
+      for (var c in containers) {
+        final cNo = c['containerNo'];
+        final events = c['events'] as List? ?? [];
+        for (var ev in events) {
+          final details = (ev['Detail'] as List? ?? []).map((e) => e.toString()).toList();
+          final d1 = details.isNotEmpty ? details[0] : '';
+          final d2 = details.length > 1 ? details[1] : '';
+          final equip = ev['EquipmentHandling'] as Map?;
+          csv.writeln(
+            '"$cNo","${ev['Order'] ?? ''}","${ev['Date'] ?? ''}","${ev['Location'] ?? ''}","${ev['UnLocationCode'] ?? ''}","${ev['Description'] ?? ''}","$d1","$d2","${equip?['Name'] ?? ''}","${equip?['Smdg'] ?? ''}"',
+          );
+        }
+      }
+
+      final String fileName = 'MSC_Booking_$bookingNo.csv'.replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
+
+      if (kIsWeb) {
+        final bytes = Uint8List.fromList(utf8.encode(csv.toString()));
+        await Share.shareXFiles([XFile.fromData(bytes, name: fileName, mimeType: 'text/csv')], text: 'MSC Booking Report $bookingNo');
+        return;
+      }
+
+      if (!kIsWeb && Platform.isWindows) {
+        String? selectedPath = await FilePicker.platform.saveFile(
+          dialogTitle: 'حفظ تقرير البوكينج إكسيل (CSV)',
+          fileName: fileName,
+          type: FileType.custom,
+          allowedExtensions: ['csv'],
+        );
+        if (selectedPath != null) {
+          await File(selectedPath).writeAsString(csv.toString(), encoding: utf8);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('✓ تم حفظ ملف الإكسيل في: $selectedPath')),
+            );
+          }
+        }
+        return;
+      }
+
+      final appDir = await getAppDirectory();
+      final file = File(path.join(appDir.path, fileName));
+      await file.writeAsString(csv.toString(), encoding: utf8);
+      await Share.shareXFiles([XFile(file.path)], text: 'MSC Booking Report $bookingNo');
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ أثناء تصدير Excel: $e')));
+      }
+    }
+  }
+
+  Future<void> _exportBookingToPdf() async {
+    if (_trackingData == null) return;
+    try {
+      final summary = _getBookingHeaderSummary();
+      final containers = _getAllParsedContainers();
+      final bookingNo = summary['trackingNo'] ?? 'BOOKING';
+
+      final pdf = pw.Document();
+      final helvetica = pw.Font.helvetica();
+      final helveticaBold = pw.Font.helveticaBold();
+
+      pw.MemoryImage? logoImage;
+      try {
+        final logoData = await rootBundle.load('assets/sealand_logo.png');
+        logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
+      } catch (_) {}
+
+      String clean(Object? val) {
+        if (val == null) return '-';
+        String s = val.toString().trim().replaceAll(RegExp(r'[^\x20-\x7E]+'), '');
+        return s.isEmpty ? '-' : s;
+      }
+
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(20),
+          theme: pw.ThemeData.withFont(base: helvetica, bold: helveticaBold),
+          header: (pw.Context context) => pw.Column(
+            children: [
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text(
+                        'SEALANDX INTEGRATED LOGISTICS',
+                        style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold, color: PdfColors.grey700),
+                      ),
+                      pw.SizedBox(height: 2),
+                      pw.Text(
+                        'MSC BOOKING CONTAINERS REPORT',
+                        style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900),
+                      ),
+                      pw.SizedBox(height: 2),
+                      pw.Text(
+                        'GENERATED: ${DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now())}',
+                        style: const pw.TextStyle(fontSize: 8, color: PdfColors.grey600),
+                      ),
+                    ],
+                  ),
+                  if (logoImage != null) pw.Image(logoImage, height: 48),
+                ],
+              ),
+              pw.SizedBox(height: 6),
+              pw.Divider(thickness: 1.5, color: PdfColors.teal),
+              pw.SizedBox(height: 6),
+            ],
+          ),
+          build: (pw.Context context) {
+            return [
+              // Booking Summary Box
+              pw.Container(
+                padding: const pw.EdgeInsets.all(8),
+                decoration: pw.BoxDecoration(
+                  color: PdfColors.grey100,
+                  border: pw.Border.all(color: PdfColors.grey400),
+                  borderRadius: const pw.BorderRadius.all(pw.Radius.circular(4)),
+                ),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Row(
+                      children: [
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'BOOKING NO: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['trackingNo']), style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, color: PdfColors.blue900)),
+                              ],
+                            ),
+                          ),
+                        ),
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'B/L NO: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['blNo']), style: const pw.TextStyle(fontSize: 9)),
+                              ],
+                            ),
+                          ),
+                        ),
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'TOTAL CONTAINERS: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['totalContainers']), style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, color: PdfColors.teal800)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    pw.SizedBox(height: 5),
+                    pw.Row(
+                      children: [
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'PORT OF LOAD: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['portOfLoad']), style: const pw.TextStyle(fontSize: 9)),
+                              ],
+                            ),
+                          ),
+                        ),
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'PORT OF DISCHARGE: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['portOfDischarge']), style: const pw.TextStyle(fontSize: 9)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    pw.SizedBox(height: 5),
+                    pw.Row(
+                      children: [
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'VESSEL / VOYAGE: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['vesselVoyage']), style: const pw.TextStyle(fontSize: 9)),
+                              ],
+                            ),
+                          ),
+                        ),
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'TRANSSHIPMENT: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['transshipments']), style: const pw.TextStyle(fontSize: 9)),
+                              ],
+                            ),
+                          ),
+                        ),
+                        pw.Expanded(
+                          child: pw.RichText(
+                            text: pw.TextSpan(
+                              children: [
+                                pw.TextSpan(text: 'POD ETA: ', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 9)),
+                                pw.TextSpan(text: clean(summary['finalEta']), style: const pw.TextStyle(fontSize: 9)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              pw.SizedBox(height: 12),
+
+              pw.Text(
+                'CONTAINERS SUMMARY TABLE (${containers.length} CONTAINERS)',
+                style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.teal800),
+              ),
+              pw.SizedBox(height: 5),
+
+              pw.Table(
+                border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.7),
+                columnWidths: const {
+                  0: pw.FixedColumnWidth(20),
+                  1: pw.FlexColumnWidth(1.7),
+                  2: pw.FlexColumnWidth(1.3),
+                  3: pw.FlexColumnWidth(1.2),
+                  4: pw.FlexColumnWidth(1.2),
+                  5: pw.FlexColumnWidth(1.2),
+                  6: pw.FlexColumnWidth(2.0),
+                  7: pw.FlexColumnWidth(1.1),
+                  8: pw.FlexColumnWidth(1.2),
+                },
+                children: [
+                  pw.TableRow(
+                    decoration: const pw.BoxDecoration(color: PdfColors.teal800),
+                    children: [
+                      '#',
+                      'CONTAINER NO',
+                      'SIZE / TYPE',
+                      'EMPTY OUT',
+                      'CY IN',
+                      'LOADED',
+                      'VESSEL / VOYAGE',
+                      'TERMINAL',
+                      'POD ETA',
+                    ]
+                        .map(
+                          (h) => pw.Padding(
+                            padding: const pw.EdgeInsets.symmetric(vertical: 5, horizontal: 3),
+                            child: pw.Text(
+                              h,
+                              style: pw.TextStyle(fontSize: 7.5, fontWeight: pw.FontWeight.bold, color: PdfColors.white),
+                              textAlign: pw.TextAlign.center,
+                            ),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                  for (int i = 0; i < containers.length; i++)
+                    pw.TableRow(
+                      decoration: pw.BoxDecoration(
+                        color: i % 2 == 0 ? PdfColors.white : PdfColors.grey100,
+                      ),
+                      children: [
+                        '${i + 1}',
+                        clean(containers[i]['containerNo']),
+                        clean(containers[i]['containerType']),
+                        clean(containers[i]['emptyDate']),
+                        clean(containers[i]['cyInDate']),
+                        clean(containers[i]['loadedDate']),
+                        clean(containers[i]['vesselVoyage']),
+                        clean(containers[i]['terminalName']),
+                        clean(containers[i]['podEta']),
+                      ]
+                          .asMap()
+                          .entries
+                          .map(
+                            (entry) => pw.Padding(
+                              padding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 3),
+                              child: pw.Text(
+                                entry.value,
+                                style: pw.TextStyle(
+                                  fontSize: 7.5,
+                                  fontWeight: entry.key == 1 ? pw.FontWeight.bold : pw.FontWeight.normal,
+                                ),
+                                textAlign: pw.TextAlign.center,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                ],
+              ),
+              pw.SizedBox(height: 14),
+
+              pw.Text(
+                'DETAILED CONTAINER MOVEMENTS',
+                style: pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold, color: PdfColors.blue900),
+              ),
+              pw.SizedBox(height: 6),
+
+              for (int i = 0; i < containers.length; i++) ...[
+                pw.Container(
+                  width: double.infinity,
+                  padding: const pw.EdgeInsets.symmetric(vertical: 4, horizontal: 6),
+                  decoration: const pw.BoxDecoration(color: PdfColors.teal50),
+                  child: pw.Text(
+                    '${i + 1}. CONTAINER: ${clean(containers[i]['containerNo'])}  |  TYPE: ${clean(containers[i]['containerType'])}  |  LATEST: ${clean(containers[i]['latestStatusDesc'])} (${clean(containers[i]['latestStatusDate'])})',
+                    style: pw.TextStyle(fontSize: 8.5, fontWeight: pw.FontWeight.bold, color: PdfColors.teal900),
+                  ),
+                ),
+                pw.Table(
+                  border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+                  columnWidths: const {
+                    0: pw.FlexColumnWidth(1.1),
+                    1: pw.FlexColumnWidth(2.2),
+                    2: pw.FlexColumnWidth(2.2),
+                    3: pw.FlexColumnWidth(1.8),
+                  },
+                  children: [
+                    for (var ev in (containers[i]['events'] as List? ?? []))
+                      pw.TableRow(
+                        children: [
+                          clean(ev['Date']),
+                          clean(ev['Description']),
+                          clean(ev['Location']),
+                          clean(((ev['Detail'] as List? ?? []).join(' / '))),
+                        ]
+                            .map(
+                              (cell) => pw.Padding(
+                                padding: const pw.EdgeInsets.all(3),
+                                child: pw.Text(cell, style: const pw.TextStyle(fontSize: 7)),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                  ],
+                ),
+                pw.SizedBox(height: 8),
+              ],
+            ];
+          },
+        ),
+      );
+
+      final String fileName = 'MSC_Booking_$bookingNo.pdf'.replaceAll(RegExp(r'[^a-zA-Z0-9_\.-]'), '_');
+      final pdfBytes = await pdf.save();
+
+      if (kIsWeb) {
+        await Printing.sharePdf(bytes: pdfBytes, filename: fileName);
+        return;
+      }
+
+      if (!kIsWeb && Platform.isWindows) {
+        String? selectedPath = await FilePicker.platform.saveFile(
+          dialogTitle: 'حفظ تقرير البوكينج PDF',
+          fileName: fileName,
+          type: FileType.custom,
+          allowedExtensions: ['pdf'],
+        );
+        if (selectedPath != null) {
+          await File(selectedPath).writeAsBytes(pdfBytes);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('✓ تم حفظ تقرير البوكينج PDF في: $selectedPath')),
+            );
+          }
+        }
+        return;
+      }
+
+      final appDir = await getAppDirectory();
+      final file = File(path.join(appDir.path, fileName));
+      await file.writeAsBytes(pdfBytes);
+      await Share.shareXFiles([XFile(file.path)], text: 'MSC Booking Report: $bookingNo');
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('خطأ أثناء تصدير PDF: $e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.of(context).size.width > 700;
+    final summary = _getBookingHeaderSummary();
+    final containers = _getAllParsedContainers();
+
+    return Center(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: wide ? 950 : double.infinity),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Search Card
+              Card(
+                elevation: 4,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.directions_boat, color: Color(0xFF00BFA5)),
+                          SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              'استعلام وتقرير حاويات البوكينج من MSC',
+                              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF00BFA5)),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _searchController,
+                        inputFormatters: [
+                          UpperCaseTextFormatter(),
+                          FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+                        ],
+                        textCapitalization: TextCapitalization.characters,
+                        decoration: InputDecoration(
+                          labelText: 'رقم البوكينج أو البوليصة أو الحاوية (مثال: EBKG19278768)',
+                          border: const OutlineInputBorder(),
+                          prefixIcon: const Icon(Icons.confirmation_number_outlined, color: Color(0xFF00BFA5)),
+                          suffixIcon: IconButton(
+                            icon: const Icon(Icons.clear),
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() {
+                                _trackingData = null;
+                                _errorMessage = '';
+                              });
+                            },
+                          ),
+                        ),
+                        onSubmitted: (_) => _fetchBookingData(),
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: ElevatedButton.icon(
+                          onPressed: _loading ? null : _fetchBookingData,
+                          icon: _loading
+                              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                              : const Icon(Icons.search),
+                          label: const Text('بحث واستخراج حاويات البوكينج من MSC', style: TextStyle(fontSize: 16)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF009688),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              if (_errorMessage.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withAlpha(30),
+                    border: Border.all(color: Colors.red),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline, color: Colors.red),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _errorMessage,
+                          style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+              if (_trackingData != null && containers.isNotEmpty) ...[
+                // Export & Copy Buttons
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _exportBookingToPdf,
+                      icon: const Icon(Icons.picture_as_pdf, color: Colors.white),
+                      label: const Text('تصدير تقرير البوكينج PDF'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade800,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                    ElevatedButton.icon(
+                      onPressed: _exportBookingToExcel,
+                      icon: const Icon(Icons.table_chart, color: Colors.white),
+                      label: const Text('تصدير Excel (CSV)'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green.shade800,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                    ElevatedButton.icon(
+                      onPressed: _copyContainerNumbers,
+                      icon: const Icon(Icons.copy, color: Colors.white),
+                      label: Text('نسخ أرقام الحاويات (${containers.length})'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueGrey.shade700,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+
+                // 1. Booking General Info Card
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                  child: Text(
+                    'بيانات البوكينج والشحنة الأساسية (Booking Summary)',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF00BFA5)),
+                  ),
+                ),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Table(
+                      border: TableBorder.all(color: Colors.white10, width: 1, borderRadius: BorderRadius.circular(8)),
+                      columnWidths: const {
+                        0: FlexColumnWidth(2),
+                        1: FlexColumnWidth(3),
+                      },
+                      children: {
+                        'رقم البوكينج / البحث (Tracking No)': summary['trackingNo'] ?? '-',
+                        'رقم البوليصة (B/L No)': summary['blNo'] ?? '-',
+                        'إجمالي عدد الحاويات (Total Containers)': '${summary['totalContainers']} حاوية',
+                        'ميناء الشحن (Port of Load)': summary['portOfLoad'] ?? '-',
+                        'ميناء التفريغ (Port of Discharge)': summary['portOfDischarge'] ?? '-',
+                        'ميناء الترانزيت (Transshipment)': summary['transshipments'] ?? '-',
+                        'السفينة والرحلة (Vessel / Voyage)': summary['vesselVoyage'] ?? '-',
+                        'المحطة / الساحة (Terminal)': summary['terminal'] ?? '-',
+                        'تاريخ الاحتساب (Price Calculation Date)': summary['priceCalcDate'] ?? '-',
+                        'تاريخ الوصول المتوقع (Final POD ETA)': summary['finalEta'] ?? '-',
+                      }.entries.map((e) {
+                        return TableRow(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.all(8.0),
+                              child: Text(e.key, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white70)),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.all(8.0),
+                              child: Text(
+                                e.value,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: e.key.contains('Total') || e.key.contains('Tracking') ? FontWeight.bold : FontWeight.normal,
+                                  color: e.key.contains('Total') ? const Color(0xFF00BFA5) : Colors.white,
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // 2. Containers Summary Table
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                  child: Text(
+                    'جدول الحاويات التابعة للبوكينج (${containers.length} حاويات)',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF00BFA5)),
+                  ),
+                ),
+                Card(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: DataTable(
+                      headingRowColor: WidgetStateProperty.all(const Color(0xFF004D40)),
+                      columns: const [
+                        DataColumn(label: Text('#', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('رقم الحاوية', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('المقاس والنوع', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('صرف الفارغ (Empty)', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('دخول الساحة (CY In)', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('تاريخ الشحن (Loaded)', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('السفينة / الرحلة', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('المحطة', style: TextStyle(fontWeight: FontWeight.bold))),
+                        DataColumn(label: Text('وصول متوقع (ETA)', style: TextStyle(fontWeight: FontWeight.bold))),
+                      ],
+                      rows: List.generate(containers.length, (i) {
+                        final c = containers[i];
+                        return DataRow(
+                          cells: [
+                            DataCell(Text('${i + 1}')),
+                            DataCell(
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  SelectableText(
+                                    c['containerNo'].toString(),
+                                    style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF00BFA5)),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.copy, size: 15, color: Colors.white54),
+                                    tooltip: 'نسخ رقم الحاوية',
+                                    onPressed: () {
+                                      Clipboard.setData(ClipboardData(text: c['containerNo'].toString()));
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text('تم نسخ ${c['containerNo']}'), duration: const Duration(seconds: 1)),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ),
+                            DataCell(Text(c['containerType'].toString())),
+                            DataCell(Text(c['emptyDate'].toString())),
+                            DataCell(Text(c['cyInDate'].toString())),
+                            DataCell(Text(c['loadedDate'].toString())),
+                            DataCell(Text(c['vesselVoyage'].toString())),
+                            DataCell(Text(c['terminalName'].toString())),
+                            DataCell(Text(c['podEta'].toString())),
+                          ],
+                        );
+                      }),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // 3. Detailed Movements per Container
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                  child: Text(
+                    'تفاصيل حركات كل حاوية (Container Movements)',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF00BFA5)),
+                  ),
+                ),
+                ...List.generate(containers.length, (idx) {
+                  final c = containers[idx];
+                  final events = c['events'] as List? ?? [];
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    child: ExpansionTile(
+                      initiallyExpanded: idx == 0,
+                      leading: CircleAvatar(
+                        backgroundColor: const Color(0xFF009688).withAlpha(40),
+                        child: Text(
+                          '${idx + 1}',
+                          style: const TextStyle(color: Color(0xFF00BFA5), fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      title: Text(
+                        '${c['containerNo']}  (${c['containerType']})',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                      ),
+                      subtitle: Text(
+                        'آخر حركة: ${c['latestStatusDesc']} (${c['latestStatusDate']}) | المحطة: ${c['terminalName']}',
+                        style: const TextStyle(fontSize: 12, color: Colors.white70),
+                      ),
+                      children: [
+                        const Divider(height: 1),
+                        ListView.separated(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: events.length,
+                          separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10),
+                          itemBuilder: (context, evIdx) {
+                            final ev = events[evIdx];
+                            final details = (ev['Detail'] as List? ?? []).join(' - ');
+                            final equip = ev['EquipmentHandling'] as Map?;
+                            final eqName = (equip?['Name'] ?? '').toString();
+                            return ListTile(
+                              dense: true,
+                              leading: const Icon(Icons.timeline, color: Color(0xFF00BFA5), size: 20),
+                              title: Text(
+                                '${ev['Description'] ?? '-'}  ${details.isNotEmpty ? '($details)' : ''}',
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                              ),
+                              subtitle: Text(
+                                '${ev['Location'] ?? '-'}${eqName.isNotEmpty ? ' | $eqName' : ''}',
+                                style: const TextStyle(fontSize: 12, color: Colors.white60),
+                              ),
+                              trailing: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.white10,
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  (ev['Date'] ?? '-').toString(),
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

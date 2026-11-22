@@ -153,6 +153,24 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
+    if (action === 'mscTrack') {
+      var trackNo = (data.trackingNumber || "").toString().trim().toUpperCase();
+      var mode = (data.trackingMode || "1").toString();
+      var mscRes = UrlFetchApp.fetch("https://www.msc.com/api/feature/tools/TrackingInfo", {
+        method: "post",
+        contentType: "application/json",
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        },
+        payload: JSON.stringify({ trackingNumber: trackNo, trackingMode: mode }),
+        muteHttpExceptions: true
+      });
+      return ContentService.createTextOutput(mscRes.getContentText())
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     if (action === 'addReport') {
       var result = handleAddOrUpdateReport(data);
       output = {

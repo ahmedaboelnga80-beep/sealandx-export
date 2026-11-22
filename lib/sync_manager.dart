@@ -306,7 +306,19 @@ class SyncManager {
             debugPrint('SyncManager: Google Apps Script response body contains success string ✓');
             isSuccess = true;
           } else {
-            lastError = 'فشل تحليل رد Apps Script: ${response.body}';
+            String cleanErr = response.body;
+            final divMatch = RegExp(r'<div[^>]*max-width:600px[^>]*>([\s\S]*?)<\/div>').firstMatch(cleanErr);
+            if (divMatch != null && divMatch.group(1) != null) {
+              cleanErr = divMatch.group(1)!.replaceAll(RegExp(r'<[^>]*>'), '').trim();
+            } else if (cleanErr.contains('<!DOCTYPE html>') || cleanErr.contains('<html')) {
+              cleanErr = cleanErr
+                  .replaceAll(RegExp(r'<script[\s\S]*?<\/script>', caseSensitive: false), '')
+                  .replaceAll(RegExp(r'<style[\s\S]*?<\/style>', caseSensitive: false), '')
+                  .replaceAll(RegExp(r'<[^>]*>'), ' ')
+                  .replaceAll(RegExp(r'\s+'), ' ')
+                  .trim();
+            }
+            lastError = 'رد من Apps Script: $cleanErr (تأكد من تحديث كود السكريبت وعمل New Version أو تحديث رابط السكريبت في الإعدادات)';
             debugPrint('SyncManager: $lastError');
           }
         }
