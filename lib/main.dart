@@ -869,7 +869,42 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) Navigator.pop(context); // Close loading
 
       if (filesToShare.isNotEmpty) {
-        await Share.shareXFiles(filesToShare, text: 'تقارير فحص الحاويات');
+        if (!kIsWeb && Platform.isWindows) {
+          if (filesToShare.length == 1) {
+            final srcFile = File(filesToShare.first.path);
+            String? selectedPath = await FilePicker.platform.saveFile(
+              dialogTitle: 'حفظ التقرير PDF',
+              fileName: path.basename(srcFile.path),
+              type: FileType.custom,
+              allowedExtensions: ['pdf'],
+            );
+            if (selectedPath != null) {
+              await srcFile.copy(selectedPath);
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('تم حفظ التقرير في: $selectedPath')),
+                );
+              }
+            }
+          } else {
+            String? dirPath = await FilePicker.platform.getDirectoryPath(
+              dialogTitle: 'اختر مجلد لحفظ تقارير الـ PDF',
+            );
+            if (dirPath != null) {
+              for (var xf in filesToShare) {
+                final srcFile = File(xf.path);
+                await srcFile.copy(path.join(dirPath, path.basename(srcFile.path)));
+              }
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('تم حفظ ${filesToShare.length} تقارير في: $dirPath')),
+                );
+              }
+            }
+          }
+        } else {
+          await Share.shareXFiles(filesToShare, text: 'تقارير فحص الحاويات');
+        }
       }
     } catch (e) {
       if (mounted) {
