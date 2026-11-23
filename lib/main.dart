@@ -6943,13 +6943,56 @@ class MscBookingSearchTab extends StatefulWidget {
 }
 
 class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
+  static const MethodChannel _mscChannel = MethodChannel('sealandx/msc_http');
   final TextEditingController _searchController = TextEditingController();
   bool _loading = false;
   String _errorMessage = '';
+  String _selectedTrackingMode = '1'; // '1' = Booking Number, '0' = Container / Bill of Lading
   Map<String, dynamic>? _trackingData;
 
   Future<Map<String, dynamic>?> _queryMscApi(String trackingNumber, String trackingMode) async {
     const mscUrl = 'https://www.msc.com/api/feature/tools/TrackingInfo';
+    final cleanTrack = trackingNumber.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+
+    // 1. On Windows: Use Windows native .NET HttpWebRequest (SChannel TLS) via PowerShell to bypass Akamai Dart TLS filter
+    if (!kIsWeb && Platform.isWindows) {
+      try {
+        final psCmd = '''
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+\$res = Invoke-WebRequest -Uri "$mscUrl" -Method Post -Headers @{"X-Requested-With"="XMLHttpRequest"; "Accept"="application/json"; "User-Agent"="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"} -ContentType "application/json" -Body '{"trackingNumber":"$cleanTrack","trackingMode":"$trackingMode"}' -UseBasicParsing
+Write-Output \$res.Content
+''';
+        final proc = await Process.run(
+          'powershell',
+          ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', psCmd],
+          stdoutEncoding: utf8,
+          stderrEncoding: utf8,
+        ).timeout(const Duration(seconds: 25));
+
+        if (proc.exitCode == 0 && proc.stdout.toString().trim().isNotEmpty) {
+          return jsonDecode(proc.stdout.toString().trim()) as Map<String, dynamic>;
+        }
+      } catch (e) {
+        debugPrint('Windows native MSC query error: $e');
+      }
+    }
+
+    // 2. On Android: Use Android native HttpsURLConnection (Conscrypt TLS) via MethodChannel
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final String? rawJson = await _mscChannel.invokeMethod<String>('queryMsc', {
+          'trackingNumber': cleanTrack,
+          'trackingMode': trackingMode,
+        });
+        if (rawJson != null && rawJson.trim().isNotEmpty) {
+          return jsonDecode(rawJson.trim()) as Map<String, dynamic>;
+        }
+      } catch (e) {
+        debugPrint('Android native MSC query error: $e');
+      }
+    }
+
+    // 3. Direct HTTP POST (Web or fallback)
     try {
       final response = await http
           .post(
@@ -6961,7 +7004,7 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             },
             body: jsonEncode({
-              'trackingNumber': trackingNumber,
+              'trackingNumber': cleanTrack,
               'trackingMode': trackingMode,
             }),
           )
@@ -6974,7 +7017,7 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
       debugPrint('Direct MSC API query note: $e');
     }
 
-    // Fallback via Google Apps Script proxy (useful for Web CORS if needed)
+    // 4. Fallback via Google Apps Script proxy (useful for Web CORS or fallback)
     try {
       final settingsBox = Hive.box('settings');
       String scriptUrl = settingsBox.get('sync_apps_script_url', defaultValue: '') as String;
@@ -6987,7 +7030,7 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
             headers: {'Content-Type': 'text/plain;charset=utf-8'},
             body: jsonEncode({
               'action': 'mscTrack',
-              'trackingNumber': trackingNumber,
+              'trackingNumber': cleanTrack,
               'trackingMode': trackingMode,
             }),
           )
@@ -7004,7 +7047,7 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
     final query = _searchController.text.trim().toUpperCase().replaceAll(' ', '');
     if (query.isEmpty) {
       setState(() {
-        _errorMessage = 'برجاء إدخال رقم البوكينج أولاً (مثال: EBKG19278768)';
+        _errorMessage = 'برجاء إدخال رقم البوكينج أو الحاوية أولاً (مثال: EBKG19548612)';
       });
       return;
     }
@@ -7016,16 +7059,19 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
     });
 
     try {
-      // 1. Try Booking Number mode ("1") first
-      Map<String, dynamic>? res = await _queryMscApi(query, '1');
+      // 1. Try user-selected mode first ('1' = Booking Number, '0' = Container / Bill of Lading)
+      final primaryMode = _selectedTrackingMode;
+      final secondaryMode = primaryMode == '1' ? '0' : '1';
+
+      Map<String, dynamic>? res = await _queryMscApi(query, primaryMode);
       bool hasBls = res != null &&
           res['IsSuccess'] == true &&
           res['Data'] != null &&
           (res['Data']['BillOfLadings'] as List? ?? []).isNotEmpty;
 
-      // 2. Fallback to Container / Bill of Lading mode ("0") if not found as Booking
+      // 2. Fallback to the other mode if not found in primary mode
       if (!hasBls) {
-        final fallbackRes = await _queryMscApi(query, '0');
+        final fallbackRes = await _queryMscApi(query, secondaryMode);
         final fallbackHasBls = fallbackRes != null &&
             fallbackRes['IsSuccess'] == true &&
             fallbackRes['Data'] != null &&
@@ -7037,9 +7083,9 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
       }
 
       if (hasBls && res != null) {
-        final rawData = res['Data'];
+        final rawData = Map<String, dynamic>.from(res['Data'] as Map);
         setState(() {
-          _trackingData = Map<String, dynamic>.from(rawData as Map);
+          _trackingData = rawData;
           _loading = false;
         });
       } else {
@@ -7093,10 +7139,15 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
       if ((descLower.contains('received at cy') || descLower.contains('gate in')) && cyInDate == '-') {
         cyInDate = dt;
       }
-      if (descLower.contains('loaded') && loadedDate == '-') {
+      if (descLower.contains('loaded') && (loadedDate == '-' || loadedDate.contains('ETD'))) {
         loadedDate = dt;
         if (details.isNotEmpty) vesselName = details[0];
         if (details.length > 1) voyageNo = details[1];
+      }
+      if (descLower.contains('departure') && loadedDate == '-') {
+        loadedDate = '$dt (ETD)';
+        if (details.isNotEmpty && vesselName == '-') vesselName = details[0];
+        if (details.length > 1 && voyageNo == '-') voyageNo = details[1];
       }
 
       if (vesselName == '-' && details.length >= 2 && !details[0].contains('EMPTY') && !details[0].contains('LADEN')) {
@@ -7669,6 +7720,96 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
                         ],
                       ),
                       const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: InkWell(
+                              onTap: () => setState(() => _selectedTrackingMode = '1'),
+                              borderRadius: BorderRadius.circular(10),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+                                decoration: BoxDecoration(
+                                  color: _selectedTrackingMode == '1'
+                                      ? const Color(0xFF009688).withAlpha(45)
+                                      : Colors.white10,
+                                  border: Border.all(
+                                    color: _selectedTrackingMode == '1'
+                                        ? const Color(0xFF00BFA5)
+                                        : Colors.white24,
+                                    width: _selectedTrackingMode == '1' ? 2 : 1,
+                                  ),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      _selectedTrackingMode == '1'
+                                          ? Icons.radio_button_checked
+                                          : Icons.radio_button_off,
+                                      color: _selectedTrackingMode == '1'
+                                          ? const Color(0xFF00BFA5)
+                                          : Colors.white54,
+                                      size: 18,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    const Flexible(
+                                      child: Text(
+                                        'رقم البوكينج (Booking Number)',
+                                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: InkWell(
+                              onTap: () => setState(() => _selectedTrackingMode = '0'),
+                              borderRadius: BorderRadius.circular(10),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+                                decoration: BoxDecoration(
+                                  color: _selectedTrackingMode == '0'
+                                      ? const Color(0xFF009688).withAlpha(45)
+                                      : Colors.white10,
+                                  border: Border.all(
+                                    color: _selectedTrackingMode == '0'
+                                        ? const Color(0xFF00BFA5)
+                                        : Colors.white24,
+                                    width: _selectedTrackingMode == '0' ? 2 : 1,
+                                  ),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      _selectedTrackingMode == '0'
+                                          ? Icons.radio_button_checked
+                                          : Icons.radio_button_off,
+                                      color: _selectedTrackingMode == '0'
+                                          ? const Color(0xFF00BFA5)
+                                          : Colors.white54,
+                                      size: 18,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    const Flexible(
+                                      child: Text(
+                                        'رقم الحاوية / البوليصة (Container / B/L)',
+                                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
                       TextField(
                         controller: _searchController,
                         inputFormatters: [
@@ -7677,7 +7818,9 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
                         ],
                         textCapitalization: TextCapitalization.characters,
                         decoration: InputDecoration(
-                          labelText: 'رقم البوكينج أو البوليصة أو الحاوية (مثال: EBKG19278768)',
+                          labelText: _selectedTrackingMode == '1'
+                              ? 'رقم البوكينج في MSC (مثال: EBKG19548612)'
+                              : 'رقم الحاوية أو البوليصة في MSC (مثال: MSDU8694546)',
                           border: const OutlineInputBorder(),
                           prefixIcon: const Icon(Icons.confirmation_number_outlined, color: Color(0xFF00BFA5)),
                           suffixIcon: IconButton(
