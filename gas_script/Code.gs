@@ -94,6 +94,24 @@ function createFallbackPdfBlob(data, fileName) {
 }
 
 function doGet(e) {
+  if (e && e.parameter && e.parameter.action === 'mscTrack') {
+    var trackNo = (e.parameter.trackingNumber || "").toString().trim().toUpperCase();
+    var mode = (e.parameter.trackingMode || "1").toString();
+    var mscRes = UrlFetchApp.fetch("https://www.msc.com/api/feature/tools/TrackingInfo", {
+      method: "post",
+      contentType: "application/json",
+      headers: {
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+      },
+      payload: JSON.stringify({ trackingNumber: trackNo, trackingMode: mode }),
+      muteHttpExceptions: true
+    });
+    return ContentService.createTextOutput(mscRes.getContentText())
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
   var driveStatus = "جاهز ومفعل ✓";
   try {
     DriveApp.getRootFolder();
