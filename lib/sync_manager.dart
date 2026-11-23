@@ -14,6 +14,8 @@ import 'firebase_mirror.dart';
 class SyncManager {
   // Default Google Apps Script Web App URL & Sheet settings
   static const String _defaultAppsScriptUrl =
+      'https://script.google.com/macros/s/AKfycbwYMVb_rN455KNqsGrOi3D3zMjgo2x16s08Y_8JvLuvSkEsFvm1YCsUWTLqgS0bONqJ8g/exec';
+  static const String _legacyAppsScriptUrl =
       'https://script.google.com/macros/s/AKfycbxWLxlMvOvCQ43r2yWQ8DYkHhZm-tlNLw_eizT1BUaJVxaL7bcq6uN-p1PnMQ30SUoN/exec';
   static const String _defaultSheetUrl =
       'https://docs.google.com/spreadsheets/d/1U4T67Ao9HoE-p9pQjE_FVP_Kba5fa258vbxP4L1p41M/edit?usp=sharing';
@@ -124,7 +126,7 @@ class SyncManager {
       String url = (customUrl != null && customUrl.trim().isNotEmpty)
           ? customUrl.trim()
           : (settingsBox.get('sync_apps_script_url', defaultValue: '') as String);
-      if (url.trim().isEmpty) {
+      if (url.trim().isEmpty || url.trim() == _legacyAppsScriptUrl) {
         url = _defaultAppsScriptUrl;
       }
       final response = await _postWithRedirects(
@@ -230,7 +232,7 @@ class SyncManager {
       // Get configuration from Hive settings Box
       final settingsBox = Hive.box('settings');
       String appsScriptUrl = settingsBox.get('sync_apps_script_url', defaultValue: '') as String;
-      if (appsScriptUrl.trim().isEmpty) {
+      if (appsScriptUrl.trim().isEmpty || appsScriptUrl.trim() == _legacyAppsScriptUrl) {
         appsScriptUrl = _defaultAppsScriptUrl;
       }
       String sheetUrl = settingsBox.get('sync_sheet_url', defaultValue: '') as String;

@@ -6950,16 +6950,37 @@ class _MscBookingSearchTabState extends State<MscBookingSearchTab> {
   String _selectedTrackingMode = '1'; // '1' = Booking Number, '0' = Container / Bill of Lading
   Map<String, dynamic>? _trackingData;
 
+  Future<void> _mirrorMscToCloudCache(String cleanTrack, Map<String, dynamic> res) async {
+    try {
+      final settingsBox = Hive.box('settings');
+      String scriptUrl = settingsBox.get('sync_apps_script_url', defaultValue: '') as String;
+      if (scriptUrl.trim().isEmpty ||
+          scriptUrl.contains('AKfycbxWLxlMvOvCQ43r2yWQ8DYkHhZm-tlNLw_eizT1BUaJVxaL7bcq6uN-p1PnMQ30SUoN')) {
+        scriptUrl = 'https://script.google.com/macros/s/AKfycbwYMVb_rN455KNqsGrOi3D3zMjgo2x16s08Y_8JvLuvSkEsFvm1YCsUWTLqgS0bONqJ8g/exec';
+      }
+      final encodedPayload = jsonEncode(res);
+      await SyncManager.postWithRedirects(
+        scriptUrl,
+        {'Content-Type': 'text/plain;charset=utf-8'},
+        jsonEncode({
+          'action': 'saveMscCache',
+          'trackingNumber': cleanTrack,
+          'payload': encodedPayload,
+        }),
+      );
+    } catch (_) {}
+  }
+
   Future<Map<String, dynamic>?> _queryMscApi(String trackingNumber, String trackingMode) async {
     const mscUrl = 'https://www.msc.com/api/feature/tools/TrackingInfo';
     final cleanTrack = trackingNumber.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
 
-    // 1. On Windows: Use Windows native .NET HttpWebRequest (SChannel TLS) via PowerShell to bypass Akamai Dart TLS filter
+    // 1. On Windows: Use Windows native .NET Invoke-RestMethod with -DisableKeepAlive (SChannel TLS)
     if (!kIsWeb && Platform.isWindows) {
       try {
         final psCmd = '''
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-\$res = Invoke-WebRequest -Uri "$mscUrl" -Method Post -Headers @{"X-Requested-With"="XMLHttpRequest"; "Accept"="application/json"; "User-Agent"="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"} -ContentType "application/json" -Body '{"trackingNumber":"$cleanTrack","trackingMode":"$trackingMode"}' -UseBasicParsing
+\$res = Invoke-WebRequest -Uri "$mscUrl" -Method Post -Headers @{"X-Requested-With"="XMLHttpRequest"; "Accept"="application/json"; "User-Agent"="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"} -ContentType "application/json" -Body '{"trackingNumber":"$cleanTrack","trackingMode":"$trackingMode"}' -DisableKeepAlive -UseBasicParsing
 Write-Output \$res.Content
 ''';
         final proc = await Process.run(
@@ -6970,14 +6991,18 @@ Write-Output \$res.Content
         ).timeout(const Duration(seconds: 25));
 
         if (proc.exitCode == 0 && proc.stdout.toString().trim().isNotEmpty) {
-          return jsonDecode(proc.stdout.toString().trim()) as Map<String, dynamic>;
+          final parsed = jsonDecode(proc.stdout.toString().trim()) as Map<String, dynamic>;
+          if (parsed['IsSuccess'] == true) {
+            _mirrorMscToCloudCache(cleanTrack, parsed);
+          }
+          return parsed;
         }
       } catch (e) {
         debugPrint('Windows native MSC query error: $e');
       }
     }
 
-    // 2. On Android: Use Android native HttpsURLConnection (Conscrypt TLS) via MethodChannel
+    // 2. On Android: Use Android native Chromium WebView TLS via MethodChannel
     if (!kIsWeb && Platform.isAndroid) {
       try {
         final String? rawJson = await _mscChannel.invokeMethod<String>('queryMsc', {
@@ -6985,7 +7010,11 @@ Write-Output \$res.Content
           'trackingMode': trackingMode,
         });
         if (rawJson != null && rawJson.trim().isNotEmpty) {
-          return jsonDecode(rawJson.trim()) as Map<String, dynamic>;
+          final parsed = jsonDecode(rawJson.trim()) as Map<String, dynamic>;
+          if (parsed['IsSuccess'] == true) {
+            _mirrorMscToCloudCache(cleanTrack, parsed);
+          }
+          return parsed;
         }
       } catch (e) {
         debugPrint('Android native MSC query error: $e');
@@ -7008,7 +7037,7 @@ Write-Output \$res.Content
               'trackingMode': trackingMode,
             }),
           )
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 12));
 
       if (response.statusCode == 200) {
         return jsonDecode(response.body) as Map<String, dynamic>;
@@ -7017,12 +7046,24 @@ Write-Output \$res.Content
       debugPrint('Direct MSC API query note: $e');
     }
 
+    // 4. Bundled MSC Cache asset (instant fallback for Web / offline)
+    try {
+      final cacheStr = await rootBundle.loadString('assets/msc_cache.json');
+      if (cacheStr.isNotEmpty) {
+        final cacheMap = jsonDecode(cacheStr) as Map<String, dynamic>;
+        if (cacheMap.containsKey(cleanTrack)) {
+          return Map<String, dynamic>.from(cacheMap[cleanTrack] as Map);
+        }
+      }
+    } catch (_) {}
+
     // 4. Fallback via Google Apps Script proxy (GET first for Web CORS compatibility, then POST with redirects)
     try {
       final settingsBox = Hive.box('settings');
       String scriptUrl = settingsBox.get('sync_apps_script_url', defaultValue: '') as String;
-      if (scriptUrl.trim().isEmpty) {
-        scriptUrl = 'https://script.google.com/macros/s/AKfycbxWLxlMvOvCQ43r2yWQ8DYkHhZm-tlNLw_eizT1BUaJVxaL7bcq6uN-p1PnMQ30SUoN/exec';
+      if (scriptUrl.trim().isEmpty ||
+          scriptUrl.contains('AKfycbxWLxlMvOvCQ43r2yWQ8DYkHhZm-tlNLw_eizT1BUaJVxaL7bcq6uN-p1PnMQ30SUoN')) {
+        scriptUrl = 'https://script.google.com/macros/s/AKfycbwYMVb_rN455KNqsGrOi3D3zMjgo2x16s08Y_8JvLuvSkEsFvm1YCsUWTLqgS0bONqJ8g/exec';
       }
       final sep = scriptUrl.contains('?') ? '&' : '?';
       final getUrl = '$scriptUrl${sep}action=mscTrack&trackingNumber=${Uri.encodeComponent(cleanTrack)}&trackingMode=${Uri.encodeComponent(trackingMode)}';

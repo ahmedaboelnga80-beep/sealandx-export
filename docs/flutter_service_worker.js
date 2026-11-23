@@ -3,10 +3,11 @@ const MANIFEST = 'flutter-app-manifest';
 const TEMP = 'flutter-temp-cache';
 const CACHE_NAME = 'flutter-app-cache';
 
-const RESOURCES = {"assets/AssetManifest.bin": "043654b5c3b0fe6d585f8bdc216ca767",
-"assets/AssetManifest.bin.json": "346a0a29de3f1246f98bfca9e5d5fbb6",
+const RESOURCES = {"assets/AssetManifest.bin": "7d4c4a90d2682d6d3a8cf33946a69ad6",
+"assets/AssetManifest.bin.json": "72b31fcd6c24950752715beae767f4eb",
 "assets/assets/fonts/Cairo-Bold.ttf": "227e5741129315f9246c5bd722372ce6",
 "assets/assets/fonts/Cairo-Regular.ttf": "22e156b807f3147bb7dcafadc52ab721",
+"assets/assets/msc_cache.json": "c36f1d0e768766a4fa52dcd9a3a88db6",
 "assets/assets/sealand_logo.png": "e0302b60eb1f84930fcd797240b3d9b0",
 "assets/FontManifest.json": "9309a407d912badc3b17a314ce37dc0e",
 "assets/fonts/MaterialIcons-Regular.otf": "916d388966da0b8b338bbd179797017e",
@@ -31,14 +32,14 @@ const RESOURCES = {"assets/AssetManifest.bin": "043654b5c3b0fe6d585f8bdc216ca767
 "canvaskit/wimp.wasm": "b4e2ec2b2d6eb78885e3c5e6ea841aec",
 "favicon.png": "5dcef449791fa27946b3d35ad8803796",
 "flutter.js": "24bc71911b75b5f8135c949e27a2984e",
-"flutter_bootstrap.js": "c42c12901d92519e3e3f951cace403b9",
+"flutter_bootstrap.js": "f9f2e236bf819fa7e8f4c4dbd03387b4",
 "icons/Icon-192.png": "ac9a721a12bbc803b44f645561ecb1e1",
 "icons/Icon-512.png": "96e752610906ba2a93c65f8abe1645f1",
 "icons/Icon-maskable-192.png": "c457ef57daa1d16f64b27b786ec2ea3c",
 "icons/Icon-maskable-512.png": "301a7604d45b3e739efc881eb04896ea",
 "index.html": "274c6d11eb56bedcbf85c07b037d83bc",
 "/": "274c6d11eb56bedcbf85c07b037d83bc",
-"main.dart.js": "99eefb50ae9bcd27b0eab6547f31ed71",
+"main.dart.js": "0e839c731419b92c1202363da54f2497",
 "manifest.json": "d1c504aacaf6b639632195de1e63dd0e",
 "version.json": "ab10ecacc0595c02ed64472eb4b7e9e7"};
 // The application shell files that are downloaded before a service worker can
