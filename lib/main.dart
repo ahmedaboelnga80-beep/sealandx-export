@@ -1253,20 +1253,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
               pw.Divider(thickness: 2, color: PdfColors.teal),
               pw.SizedBox(height: 8),
-              if (activeImages.isNotEmpty)
-                pw.Wrap(
-                  spacing: 12,
-                  runSpacing: 10,
-                  alignment: pw.WrapAlignment.center,
-                  children: activeImages.map((imgItem) {
-                    final image = pw.MemoryImage(imgItem['bytes'] as Uint8List);
-                    final baseName = imgItem['name'].toString();
-                    final isRear =
-                        baseName.toLowerCase().contains('rear') ||
-                        baseName.toLowerCase().contains('part_0') ||
-                        baseName.contains('خلفي');
-                    return pw.Container(
-                      width: isRear ? 500 : 244,
+              ...activeImages.map((imgItem) {
+                final image = pw.MemoryImage(imgItem['bytes'] as Uint8List);
+                final baseName = imgItem['name'].toString();
+                final isRear =
+                    baseName.toLowerCase().contains('rear') ||
+                    baseName.toLowerCase().contains('part_0') ||
+                    baseName.contains('خلفي');
+                return pw.Padding(
+                  padding: const pw.EdgeInsets.only(bottom: 10),
+                  child: pw.Center(
+                    child: pw.Container(
+                      width: isRear ? 500 : 260,
                       padding: const pw.EdgeInsets.all(5),
                       decoration: pw.BoxDecoration(
                         border: pw.Border.all(color: PdfColors.grey300),
@@ -1276,12 +1274,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           pw.Center(
                             child: pw.Image(
                               image,
-                              height: isRear ? 250 : 165,
-                              width: isRear ? 490 : 234,
+                              height: isRear ? 350 : 180,
+                              width: isRear ? 490 : 250,
                               fit: pw.BoxFit.contain,
                             ),
                           ),
-                          pw.SizedBox(height: 4),
+                          pw.SizedBox(height: 5),
                           pw.Text(
                             (() {
                               String b = baseName.toUpperCase();
@@ -1324,9 +1322,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           ),
                         ],
                       ),
-                    );
-                  }).toList(),
-                ),
+                    ),
+                  ),
+                );
+              }),
               pw.SizedBox(height: 12),
               pw.Text(
                 'REPORT CONTENT:',
@@ -4553,58 +4552,57 @@ class _AlbumScreenState extends State<AlbumScreen> {
               pw.Divider(thickness: 2, color: PdfColors.teal),
               pw.SizedBox(height: 10),
 
-              // Images Grid
-              pw.Wrap(
-                spacing: 12,
-                runSpacing: 10,
-                alignment: pw.WrapAlignment.center,
-                children: _parts
-                    .where(
-                      (p) => (kIsWeb
-                          ? p.webImageBytes != null
-                          : p.image != null),
-                    )
-                    .map((p) {
-                      final image = pw.MemoryImage(
-                        kIsWeb
-                            ? p.webImageBytes!
-                            : p.image!.readAsBytesSync(),
-                      );
-                      final isRearDoor =
-                          p.name.contains('الأبواب الخلفية') ||
-                          p.name.contains('Rear');
-                      return pw.Container(
-                        width: isRearDoor ? 500 : 244,
-                        padding: const pw.EdgeInsets.all(5),
-                        decoration: pw.BoxDecoration(
-                          border: pw.Border.all(color: PdfColors.grey300),
-                        ),
-                        child: pw.Column(
-                          crossAxisAlignment: pw.CrossAxisAlignment.start,
-                          children: [
-                            pw.Center(
-                              child: pw.Image(
-                                image,
-                                height: isRearDoor ? 250 : 165,
-                                width: isRearDoor ? 490 : 234,
-                                fit: pw.BoxFit.contain,
+              // Images stacked vertically one under another
+              ..._parts
+                  .where(
+                    (p) => (kIsWeb
+                        ? p.webImageBytes != null
+                        : p.image != null),
+                  )
+                  .map((p) {
+                    final image = pw.MemoryImage(
+                      kIsWeb
+                          ? p.webImageBytes!
+                          : p.image!.readAsBytesSync(),
+                    );
+                    final isRearDoor =
+                        p.name.contains('الأبواب الخلفية') ||
+                        p.name.contains('Rear');
+                    return pw.Padding(
+                      padding: const pw.EdgeInsets.only(bottom: 10),
+                      child: pw.Center(
+                        child: pw.Container(
+                          width: isRearDoor ? 500 : 260,
+                          padding: const pw.EdgeInsets.all(5),
+                          decoration: pw.BoxDecoration(
+                            border: pw.Border.all(color: PdfColors.grey300),
+                          ),
+                          child: pw.Column(
+                            crossAxisAlignment: pw.CrossAxisAlignment.start,
+                            children: [
+                              pw.Center(
+                                child: pw.Image(
+                                  image,
+                                  height: isRearDoor ? 350 : 180,
+                                  width: isRearDoor ? 490 : 250,
+                                  fit: pw.BoxFit.contain,
+                                ),
                               ),
-                            ),
-                            pw.SizedBox(height: 4),
-                            pw.Text(
-                              partMap[p.name] ??
-                                  cleanText(p.name).toUpperCase(),
-                              style: pw.TextStyle(
-                                fontSize: 10,
-                                fontWeight: pw.FontWeight.bold,
+                              pw.SizedBox(height: 5),
+                              pw.Text(
+                                partMap[p.name] ??
+                                    cleanText(p.name).toUpperCase(),
+                                style: pw.TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: pw.FontWeight.bold,
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      );
-                    })
-                    .toList(),
-              ),
+                      ),
+                    );
+                  }),
 
               pw.SizedBox(height: 12),
               pw.Text(

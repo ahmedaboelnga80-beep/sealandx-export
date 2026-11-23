@@ -655,18 +655,16 @@ class SyncManager {
               pw.Divider(thickness: 2, color: PdfColors.teal),
               pw.SizedBox(height: 8),
 
-              // Images Grid (direct Wrap without pw.Center so it can span and fit on 1 page)
-              if (activeParts.isNotEmpty)
-                pw.Wrap(
-                  spacing: 12,
-                  runSpacing: 10,
-                  alignment: pw.WrapAlignment.center,
-                  children: activeParts.map((p) {
-                    final image = pw.MemoryImage(p['bytes'] as Uint8List);
-                    final isRearDoor = p['id'].toString().contains('part_0') ||
-                        p['name'].toString().contains('REAR');
-                    return pw.Container(
-                      width: isRearDoor ? 500 : 244,
+              // Images stacked vertically one under another (as separate MultiPage children so they never overflow)
+              ...activeParts.map((p) {
+                final image = pw.MemoryImage(p['bytes'] as Uint8List);
+                final isRearDoor = p['id'].toString().contains('part_0') ||
+                    p['name'].toString().contains('REAR');
+                return pw.Padding(
+                  padding: const pw.EdgeInsets.only(bottom: 10),
+                  child: pw.Center(
+                    child: pw.Container(
+                      width: isRearDoor ? 500 : 260,
                       padding: const pw.EdgeInsets.all(5),
                       decoration: pw.BoxDecoration(
                         border: pw.Border.all(color: PdfColors.grey300),
@@ -677,12 +675,12 @@ class SyncManager {
                           pw.Center(
                             child: pw.Image(
                               image,
-                              height: isRearDoor ? 250 : 165,
-                              width: isRearDoor ? 490 : 234,
+                              height: isRearDoor ? 350 : 180,
+                              width: isRearDoor ? 490 : 250,
                               fit: pw.BoxFit.contain,
                             ),
                           ),
-                          pw.SizedBox(height: 4),
+                          pw.SizedBox(height: 5),
                           pw.Text(
                             p['name'].toString(),
                             style: pw.TextStyle(
@@ -692,9 +690,10 @@ class SyncManager {
                           ),
                         ],
                       ),
-                    );
-                  }).toList(),
-                ),
+                    ),
+                  ),
+                );
+              }),
 
               pw.SizedBox(height: 12),
               pw.Text(
