@@ -7017,24 +7017,22 @@ Write-Output \$res.Content
       debugPrint('Direct MSC API query note: $e');
     }
 
-    // 4. Fallback via Google Apps Script proxy (useful for Web CORS or fallback)
+    // 4. Fallback via Google Apps Script proxy (follows 302 redirects properly)
     try {
       final settingsBox = Hive.box('settings');
       String scriptUrl = settingsBox.get('sync_apps_script_url', defaultValue: '') as String;
       if (scriptUrl.trim().isEmpty) {
         scriptUrl = 'https://script.google.com/macros/s/AKfycbxWLxlMvOvCQ43r2yWQ8DYkHhZm-tlNLw_eizT1BUaJVxaL7bcq6uN-p1PnMQ30SUoN/exec';
       }
-      final proxyRes = await http
-          .post(
-            Uri.parse(scriptUrl),
-            headers: {'Content-Type': 'text/plain;charset=utf-8'},
-            body: jsonEncode({
-              'action': 'mscTrack',
-              'trackingNumber': cleanTrack,
-              'trackingMode': trackingMode,
-            }),
-          )
-          .timeout(const Duration(seconds: 20));
+      final proxyRes = await SyncManager.postWithRedirects(
+        scriptUrl,
+        {'Content-Type': 'text/plain;charset=utf-8'},
+        jsonEncode({
+          'action': 'mscTrack',
+          'trackingNumber': cleanTrack,
+          'trackingMode': trackingMode,
+        }),
+      );
       if (proxyRes.statusCode == 200) {
         return jsonDecode(proxyRes.body) as Map<String, dynamic>;
       }

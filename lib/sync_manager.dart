@@ -773,6 +773,11 @@ class SyncManager {
     }
   }
 
+  // Public helper for HTTP POST requests with Google Apps Script 302 redirects
+  static Future<http.Response> postWithRedirects(
+      String url, Map<String, String> headers, String body) =>
+      _postWithRedirects(url, headers, body);
+
   // Helper function to handle HTTP POST requests with redirects
   static Future<http.Response> _postWithRedirects(
       String url, Map<String, String> headers, String body) async {

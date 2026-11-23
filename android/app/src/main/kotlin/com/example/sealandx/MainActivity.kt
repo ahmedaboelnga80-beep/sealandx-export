@@ -1,17 +1,73 @@
 package com.example.sealandx
 
+import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlin.concurrent.thread
+import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "sealandx/msc_http"
+    private var hiddenWebView: WebView? = null
+    private var pageReady = false
+    private var pendingCallback: ((Boolean, String) -> Unit)? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    inner class JsBridge {
+        @JavascriptInterface
+        fun onSuccess(responseText: String) {
+            mainHandler.post {
+                val cb = pendingCallback
+                pendingCallback = null
+                cb?.invoke(true, responseText)
+            }
+        }
+
+        @JavascriptInterface
+        fun onError(errorText: String) {
+            mainHandler.post {
+                val cb = pendingCallback
+                pendingCallback = null
+                cb?.invoke(false, errorText)
+            }
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun ensureWebView(onReady: () -> Unit) {
+        if (hiddenWebView != null && pageReady) {
+            onReady()
+            return
+        }
+        val wv = WebView(this)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.userAgentString =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+        wv.addJavascriptInterface(JsBridge(), "AndroidMscBridge")
+        wv.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (!pageReady) {
+                    pageReady = true
+                    onReady()
+                }
+            }
+        }
+        hiddenWebView = wv
+        wv.loadDataWithBaseURL(
+            "https://www.msc.com/en/track-a-shipment",
+            "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body></body></html>",
+            "text/html",
+            "UTF-8",
+            null
+        )
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -19,43 +75,59 @@ class MainActivity : FlutterActivity() {
             if (call.method == "queryMsc") {
                 val trackingNumber = call.argument<String>("trackingNumber") ?: ""
                 val trackingMode = call.argument<String>("trackingMode") ?: "1"
-                thread {
-                    try {
-                        val url = URL("https://www.msc.com/api/feature/tools/TrackingInfo")
-                        val conn = url.openConnection() as HttpURLConnection
-                        conn.requestMethod = "POST"
-                        conn.connectTimeout = 20000
-                        conn.readTimeout = 20000
-                        conn.setRequestProperty("X-Requested-With", "XMLHttpRequest")
-                        conn.setRequestProperty("Accept", "application/json")
-                        conn.setRequestProperty("Content-Type", "application/json")
-                        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                        conn.doOutput = true
+                var replied = false
 
-                        val payload = "{\"trackingNumber\":\"$trackingNumber\",\"trackingMode\":\"$trackingMode\"}"
-                        val writer = OutputStreamWriter(conn.outputStream, Charsets.UTF_8)
-                        writer.write(payload)
-                        writer.flush()
-                        writer.close()
+                val timeoutRunnable = Runnable {
+                    if (!replied) {
+                        replied = true
+                        pendingCallback = null
+                        result.error("TIMEOUT", "WebView MSC request timed out", null)
+                    }
+                }
+                mainHandler.postDelayed(timeoutRunnable, 22000)
 
-                        val code = conn.responseCode
-                        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                        val reader = BufferedReader(InputStreamReader(stream, Charsets.UTF_8))
-                        val responseText = reader.readText()
-                        reader.close()
-
-                        runOnUiThread {
-                            if (code in 200..299) {
-                                result.success(responseText)
-                            } else {
-                                result.error("HTTP_$code", responseText, null)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread {
-                            result.error("ERR", e.toString(), null)
+                pendingCallback = { ok, text ->
+                    mainHandler.removeCallbacks(timeoutRunnable)
+                    if (!replied) {
+                        replied = true
+                        if (ok) {
+                            result.success(text)
+                        } else {
+                            result.error("MSC_ERR", text, null)
                         }
                     }
+                }
+
+                ensureWebView {
+                    val safeTrack = JSONObject.quote(trackingNumber)
+                    val safeMode = JSONObject.quote(trackingMode)
+                    val js = """
+                        (function() {
+                            fetch("https://www.msc.com/api/feature/tools/TrackingInfo", {
+                                method: "POST",
+                                headers: {
+                                    "X-Requested-With": "XMLHttpRequest",
+                                    "Accept": "application/json",
+                                    "Content-Type": "application/json"
+                                },
+                                body: JSON.stringify({
+                                    trackingNumber: $safeTrack,
+                                    trackingMode: $safeMode
+                                })
+                            })
+                            .then(function(r) {
+                                if (!r.ok) throw new Error("HTTP_" + r.status);
+                                return r.text();
+                            })
+                            .then(function(txt) {
+                                AndroidMscBridge.onSuccess(txt);
+                            })
+                            .catch(function(err) {
+                                AndroidMscBridge.onError(err.toString());
+                            });
+                        })();
+                    """.trimIndent()
+                    hiddenWebView?.evaluateJavascript(js, null)
                 }
             } else {
                 result.notImplemented()
